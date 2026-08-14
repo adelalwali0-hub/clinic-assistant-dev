@@ -3,11 +3,17 @@ Message Router - الموجّه المركزي
 ====================================
 يستقبل رسائل من أي قناة عبر العقد الموحّد (IncomingMessage)، يمنع
 معالجة أي رسالة مرتين (Idempotency)، يمرّرها لمنطق العمل (مصدر
-الحقيقة)، ثم يرسل الرد عبر نفس القناة.
+الحقيقة)، **يحدد الرد الفعلي أولاً**، ثم (اختيارياً) يستدعي طبقة
+مقارنة جانبية (Shadow) لأغراض الاختبار فقط، ثم يرسل الرد.
 
-ai_understand (اختياري): خطاف جانبي (Shadow Hook) فقط للاختبار في
-هذه المرحلة - يُستدعى بالتوازي مع المعالج الحقيقي دون أي تأثير على
-الرد الفعلي المُرسَل للعميلة. أي فشل فيه لا يوقف معالجة الرسالة.
+[Phase 3A] ترتيب التنفيذ الصارم:
+Incoming Message -> Rule-Based Business Logic -> تحديد reply_text
+    -> (Shadow) AI Understanding + Compare -> إرسال الرد
+
+ai_understand (اختياري) يُستدعى بعد حساب reply_text وقبل الإرسال،
+لكنه لا يملك أي وسيلة للتأثير على reply_text أو حالة الجلسة أو
+leads.csv - فقط طباعة مقارنة في الطرفية. أي فشل فيه لا يوقف إرسال
+الرد الفعلي.
 """
 
 from typing import Callable, Optional
@@ -54,18 +60,21 @@ class MessageRouter:
 
         print(f"[IN]  ({message.channel}) {message.user_id}: {message.text}")
 
-        if self.ai_understand is not None:
-            try:
-                self.ai_understand(message)
-            except Exception as e:
-                print(f"[AI Understanding] فشل غير متوقع في الطبقة الجانبية: {e}")
-
+        # 1) القواعد الثابتة تحدد الرد الفعلي أولاً وحصرياً
         try:
             reply_text = self.handler(message)
         except Exception as e:
             print(f"[ERROR] فشل معالجة الرسالة من {message.user_id}: {e}")
             reply_text = FALLBACK_ERROR_REPLY
 
+        # 2) طبقة المقارنة الجانبية (Shadow) - لا تؤثر على reply_text إطلاقاً
+        if self.ai_understand is not None:
+            try:
+                self.ai_understand(message)
+            except Exception as e:
+                print(f"[AI Understanding] فشل غير متوقع في الطبقة الجانبية: {e}")
+
+        # 3) إرسال الرد الفعلي (من القواعد الثابتة فقط)
         try:
             outgoing = OutgoingMessage(user_id=message.user_id, text=reply_text)
             success = self.channel.send_message(outgoing)
