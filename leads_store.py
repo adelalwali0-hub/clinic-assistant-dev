@@ -1,20 +1,31 @@
 """
-تسجيل طلبات الحجز والاستفسارات (Leads) بشكل دائم
-======================================================
-حفظ بسيط في ملف CSV - يسجل كل استفسار وصل لمرحلة عرض سعر، مع بيانات
-التواصل الفعلية عند تأكيد الحجز، وعمود لتتبع هل تمت متابعة الاستفسارات
-غير المحسومة (not_ready) أم لا - لتفعيل حلقة "استعادة الإيراد الضائع".
+تسجيل طلبات الحجز والاستفسارات (Leads) + محرك Lead Recovery
+======================================================================
+حفظ بسيط في ملف CSV. يسجل كل استفسار (confirmed/not_ready)، مع سعر
+الخدمة كما كان وقت إنشاء السجل (Snapshot - لا يتغيّر لاحقاً حتى لو
+تغيّرت الأسعار في services.py)، ويدير دورة حياة المتابعة على مرحلتين:
 
-لاحقاً سيُستبدل بقاعدة بيانات حقيقية ولوحة تحكم، دون أي تغيير في
-منطق العمل الذي يستدعي هذه الدالة.
+  not_ready --24h--> Follow-up 1 --72h--> Follow-up 2 --> Recovered/Expired
+
+"نتيجة المتابعة" (قيمة نهائية لكل Lead غير محسوم فوراً):
+  ""        : لم يُحسم بعد (لا يزال ضمن دورة المتابعة أو لم تبدأ)
+  "مسترجَع"  : حجزت بعد أن أُرسلت لها متابعة واحدة على الأقل
+  "أُغلق"    : حجزت مباشرة قبل أي متابعة (لا تُحتسب كاسترجاع)
+  "منتهي"   : وصلت للمتابعة الثانية دون حجز، ولم تعد مؤهلة لأي متابعة تلقائية
+
+لا قاعدة بيانات جديدة - نفس فلسفة CSV البسيطة. يهاجر تلقائياً وبأمان
+أي ملف leads.csv قديم (بالبنية السابقة) إلى البنية الجديدة عند أول
+تشغيل، دون فقدان أي بيانات موجودة ودون Crash.
 """
 
 import csv
 import os
+import re
 from datetime import datetime
 
 LEADS_FILE = "leads.csv"
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 FIELDNAMES = [
     "التاريخ والوقت",
     "معرف العميل",
@@ -22,73 +33,185 @@ FIELDNAMES = [
     "الخدمة المطلوبة",
     "الحالة",
     "بيانات التواصل",
-    "تمت المتابعة",
+    "سعر الخدمة وقت الإنشاء",
+    "مرحلة المتابعة",
+    "تاريخ آخر متابعة",
+    "نتيجة المتابعة",
+]
+
+_LEGACY_FIELDNAMES = [
+    "التاريخ والوقت", "معرف العميل", "القناة", "الخدمة المطلوبة",
+    "الحالة", "بيانات التواصل", "تمت المتابعة",
 ]
 
 
-def save_lead(user_id: str, service_name: str, channel: str, status: str, contact_info: str = "") -> None:
-    """
-    status: "confirmed" (حجز مؤكد) أو "not_ready" (استفسرت ولم تحجز الآن)
-    contact_info: نص الاسم ورقم الهاتف كما أرسلته العميلة (فارغ إذا لم تُطلب بعد)
-    """
-    file_exists = os.path.isfile(LEADS_FILE)
-    with open(LEADS_FILE, mode="a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(FIELDNAMES)
-        writer.writerow([
-            datetime.now().strftime(TIMESTAMP_FORMAT),
-            user_id,
-            channel,
-            service_name,
-            status,
-            contact_info,
-            "لا",  # لم تتم المتابعة بعد
-        ])
+def _lookup_current_price(service_name: str) -> str:
+    try:
+        from services import SERVICES
+    except Exception:
+        return ""
+    for s in SERVICES:
+        if s.get("name") == service_name:
+            return s.get("price", "")
+    return ""
+
+
+def _parse_price_to_number(price_str: str) -> int:
+    digits = re.sub(r"[^\d]", "", price_str or "")
+    return int(digits) if digits else 0
+
+
+def _migrate_legacy_file_if_needed() -> None:
+    if not os.path.isfile(LEADS_FILE):
+        return
+
+    try:
+        with open(LEADS_FILE, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            existing_fieldnames = reader.fieldnames or []
+            rows = list(reader)
+    except (OSError, csv.Error):
+        return
+
+    if existing_fieldnames == FIELDNAMES:
+        return
+
+    migrated_rows = []
+    for row in rows:
+        migrated = {
+            "التاريخ والوقت": row.get("التاريخ والوقت", ""),
+            "معرف العميل": row.get("معرف العميل", ""),
+            "القناة": row.get("القناة", ""),
+            "الخدمة المطلوبة": row.get("الخدمة المطلوبة", ""),
+            "الحالة": row.get("الحالة", ""),
+            "بيانات التواصل": row.get("بيانات التواصل", ""),
+            "سعر الخدمة وقت الإنشاء": "",
+            "مرحلة المتابعة": "1" if row.get("تمت المتابعة") == "نعم" else "0",
+            "تاريخ آخر متابعة": "",
+            "نتيجة المتابعة": "",
+        }
+        migrated_rows.append(migrated)
+
+    with open(LEADS_FILE, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(migrated_rows)
+
+    print(f"[leads_store] تمت هجرة {LEADS_FILE} إلى البنية الجديدة ({len(migrated_rows)} سجل).")
 
 
 def _read_all_rows() -> list[dict]:
+    _migrate_legacy_file_if_needed()
     if not os.path.isfile(LEADS_FILE):
         return []
-    with open(LEADS_FILE, mode="r", newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+    try:
+        with open(LEADS_FILE, "r", newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except (OSError, csv.Error):
+        return []
 
 
 def _write_all_rows(rows: list[dict]) -> None:
-    with open(LEADS_FILE, mode="w", newline="", encoding="utf-8-sig") as f:
+    with open(LEADS_FILE, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def get_eligible_followups(hours_threshold: float) -> list[dict]:
-    """
-    يرجع كل الاستفسارات التي حالتها not_ready، لم تتم متابعتها بعد،
-    ومرّ عليها أكثر من hours_threshold ساعة.
-    """
+def save_lead(user_id: str, service_name: str, channel: str, status: str, contact_info: str = "") -> None:
+    rows = _read_all_rows()
+
+    if status == "confirmed":
+        for row in rows:
+            if (
+                row.get("معرف العميل") == user_id
+                and row.get("الخدمة المطلوبة") == service_name
+                and row.get("الحالة") == "not_ready"
+                and row.get("نتيجة المتابعة", "") == ""
+            ):
+                stage = row.get("مرحلة المتابعة", "0")
+                row["نتيجة المتابعة"] = "مسترجَع" if stage in ("1", "2") else "أُغلق"
+
+    new_row = {
+        "التاريخ والوقت": datetime.now().strftime(TIMESTAMP_FORMAT),
+        "معرف العميل": user_id,
+        "القناة": channel,
+        "الخدمة المطلوبة": service_name,
+        "الحالة": status,
+        "بيانات التواصل": contact_info,
+        "سعر الخدمة وقت الإنشاء": _lookup_current_price(service_name),
+        "مرحلة المتابعة": "0",
+        "تاريخ آخر متابعة": "",
+        "نتيجة المتابعة": "",
+    }
+    rows.append(new_row)
+    _write_all_rows(rows)
+
+
+def get_leads_eligible_for_first_followup(hours_threshold: float = 24) -> list[dict]:
     eligible = []
     now = datetime.now()
     for row in _read_all_rows():
         if row.get("الحالة") != "not_ready":
             continue
-        if row.get("تمت المتابعة") == "نعم":
+        if row.get("مرحلة المتابعة", "0") != "0":
+            continue
+        if row.get("نتيجة المتابعة", "") != "":
             continue
         try:
-            lead_time = datetime.strptime(row["التاريخ والوقت"], TIMESTAMP_FORMAT)
+            created = datetime.strptime(row["التاريخ والوقت"], TIMESTAMP_FORMAT)
         except (ValueError, KeyError):
             continue
-        hours_passed = (now - lead_time).total_seconds() / 3600
-        if hours_passed >= hours_threshold:
+        if (now - created).total_seconds() / 3600 >= hours_threshold:
             eligible.append(row)
     return eligible
 
 
-def mark_followed_up(user_id: str, service_name: str, timestamp: str) -> bool:
-    """
-    يحدّث صفاً محدداً (بالمطابقة الدقيقة على التاريخ+العميل+الخدمة)
-    ليصبح "تمت المتابعة" = نعم، حتى لا تُرسل نفس الرسالة مرتين.
-    يرجع True إذا تم العثور على الصف وتحديثه.
-    """
+def get_leads_eligible_for_second_followup(hours_threshold: float = 72) -> list[dict]:
+    eligible = []
+    now = datetime.now()
+    for row in _read_all_rows():
+        if row.get("الحالة") != "not_ready":
+            continue
+        if row.get("مرحلة المتابعة", "0") != "1":
+            continue
+        if row.get("نتيجة المتابعة", "") != "":
+            continue
+        last_followup = row.get("تاريخ آخر متابعة", "")
+        if not last_followup:
+            continue
+        try:
+            last_dt = datetime.strptime(last_followup, TIMESTAMP_FORMAT)
+        except ValueError:
+            continue
+        if (now - last_dt).total_seconds() / 3600 >= hours_threshold:
+            eligible.append(row)
+    return eligible
+
+
+def get_leads_to_expire(hours_after_second_followup: float = 72) -> list[dict]:
+    candidates = []
+    now = datetime.now()
+    for row in _read_all_rows():
+        if row.get("الحالة") != "not_ready":
+            continue
+        if row.get("مرحلة المتابعة", "0") != "2":
+            continue
+        if row.get("نتيجة المتابعة", "") != "":
+            continue
+        last_followup = row.get("تاريخ آخر متابعة", "")
+        if not last_followup:
+            continue
+        try:
+            last_dt = datetime.strptime(last_followup, TIMESTAMP_FORMAT)
+        except ValueError:
+            continue
+        if (now - last_dt).total_seconds() / 3600 >= hours_after_second_followup:
+            candidates.append(row)
+    return candidates
+
+
+def mark_followup_sent(user_id: str, service_name: str, timestamp: str, new_stage: str) -> bool:
     rows = _read_all_rows()
     updated = False
     for row in rows:
@@ -97,9 +220,37 @@ def mark_followed_up(user_id: str, service_name: str, timestamp: str) -> bool:
             and row.get("معرف العميل") == user_id
             and row.get("الخدمة المطلوبة") == service_name
         ):
-            row["تمت المتابعة"] = "نعم"
+            row["مرحلة المتابعة"] = new_stage
+            row["تاريخ آخر متابعة"] = datetime.now().strftime(TIMESTAMP_FORMAT)
             updated = True
             break
     if updated:
         _write_all_rows(rows)
     return updated
+
+
+def mark_expired(user_id: str, service_name: str, timestamp: str) -> bool:
+    rows = _read_all_rows()
+    updated = False
+    for row in rows:
+        if (
+            row.get("التاريخ والوقت") == timestamp
+            and row.get("معرف العميل") == user_id
+            and row.get("الخدمة المطلوبة") == service_name
+        ):
+            row["نتيجة المتابعة"] = "منتهي"
+            updated = True
+            break
+    if updated:
+        _write_all_rows(rows)
+    return updated
+
+
+def compute_recovery_metrics() -> dict:
+    recovered_rows = [r for r in _read_all_rows() if r.get("نتيجة المتابعة") == "مسترجَع"]
+    revenue = sum(_parse_price_to_number(r.get("سعر الخدمة وقت الإنشاء", "")) for r in recovered_rows)
+    return {
+        "leads_recovered": len(recovered_rows),
+        "bookings_recovered": len(recovered_rows),
+        "revenue_recovered": revenue,
+    }
