@@ -2,8 +2,15 @@
 منطق العمل - سيناريو المحادثة + تسجيل كل استفسار (Leads) + جمع بيانات التواصل
 ================================================================================
 استفسار عن خدمة/سعر -> عرض السعر -> سؤال عن الرغبة بالحجز -> عند
-"نعم": يُطلب الاسم ورقم الهاتف -> يُسجَّل الحجز. عند "لا": يُسجَّل
-الاستفسار كـ not_ready. عند تردد واضح: رد مخصص دون حسم.
+"نعم": يُطلب الاسم ورقم الهاتف -> يُسجَّل طلب الحجز. عند "لا": يُسجَّل
+الـLead كـ declined. عند تردد واضح: رد مخصص دون حسم.
+
+[مواءمة المفردات - PRD §8/D2] ما يكتبه هذا الملف عند تسليم البيانات
+هو `booking_requested` - **طلب** حجز، لا حجز مؤكَّد. القيمة القديمة
+`confirmed` كانت تعني "أرسلت رقمها" بينما Confirmed Booking في §8 هو
+تأكيد الموظفة: حدث خارج حدود النظام لا يملك أي كود هنا كتابته.
+وحالة الجلسة `awaiting_booking_confirmation` صارت
+`awaiting_booking_reply` لنفس السبب - النظام ينتظر ردّ العميلة.
 
 [PRD D1] سجل الـLead يُنشأ **لحظة الرد بالسعر**، لا عند تسليم بيانات
 التواصل. العميلة التي تسأل عن سعر ثم تصمت لم تكن تترك أي أثر في
@@ -29,7 +36,7 @@ save_lead بسلوكه السابق حرفياً.
 والشروط تماماً كما كانت.
 
 [Phase 3B] handle_message() تقبل معامل اختياري ai_intent (افتراضياً
-None). يُستخدم حصراً داخل awaiting_booking_confirmation، وفقط إذا
+None). يُستخدم حصراً داخل awaiting_booking_reply، وفقط إذا
 كانت قيمته إحدى الثلاث الآمنة: confirm_booking / decline / hesitant.
 
 price_inquiry (حالة idle) وask_more_info يبقيان Rule-Based بالكامل
@@ -43,11 +50,12 @@ In-Memory فقط كما كان (لا يُحفَظ على القرص - قيمة �
 from channel_interface import IncomingMessage
 from services import CENTER_NAME, find_service, services_list_text
 from leads_store import (
-    REASON_DECLINED,
-    REASON_HESITANT,
+    STATE_BOOKING_REQUESTED,
+    STATE_DECLINED,
     record_booking_request,
+    record_decline,
+    record_hesitation,
     record_price_quote,
-    record_status_reason,
     save_lead,
 )
 from storage import session_store
@@ -91,7 +99,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
     text = message.text.strip()
     session = session_store.get_session(user_id)
 
-    if session["state"] == "awaiting_contact_info":
+    if session["state"] == session_store.STATE_AWAITING_CONTACT_INFO:
         service_name = session["service"]["name"]
         lead_id = session.get("lead_id")
         session_store.clear_session(user_id)
@@ -103,7 +111,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
                 user_id=user_id,
                 service_name=service_name,
                 channel=message.channel,
-                status="confirmed",
+                status=STATE_BOOKING_REQUESTED,
                 contact_info=text,
             )
         reply = (
@@ -112,7 +120,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
         )
         return reply, "confirm_booking"
 
-    if session["state"] == "awaiting_booking_confirmation":
+    if session["state"] == session_store.STATE_AWAITING_BOOKING_REPLY:
         lowered = text.lower()
         service_name = session["service"]["name"]
         lead_id = session.get("lead_id")
@@ -132,22 +140,25 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
             effective_branch = rule_branch
 
         if effective_branch == "confirm_booking":
-            session_store.update_session(user_id, state="awaiting_contact_info")
+            session_store.update_session(user_id, state=session_store.STATE_AWAITING_CONTACT_INFO)
             return "ممتاز! الرجاء إرسال اسمك ورقم هاتفك في رسالة واحدة لتأكيد الحجز.", rule_branch
 
         if effective_branch == "decline":
             session_store.clear_session(user_id)
             # الرفض يُحدِّث صف عرض السعر القائم، لا يُنشئ صفاً ثانياً.
-            # الحالة تبقى not_ready والصف يبقى مؤهلاً للمتابعة (D-015).
-            if not (lead_id and record_status_reason(lead_id, REASON_DECLINED)):
-                save_lead(user_id=user_id, service_name=service_name, channel=message.channel, status="not_ready")
+            # الحالة تصير declined، وهي داخل OPEN_STATES فيبقى الصف
+            # مؤهلاً للمتابعة تماماً كما كان (D-015).
+            if not (lead_id and record_decline(lead_id)):
+                save_lead(user_id=user_id, service_name=service_name,
+                          channel=message.channel, status=STATE_DECLINED)
             return "تمام 🌸 إذا احتجتِ أي معلومة إضافية عن خدماتنا أنا موجودة.", rule_branch
 
         if effective_branch == "hesitant":
-            # التردد لا يحسم شيئاً - يُسجَّل السبب والصف يبقى كما هو،
-            # مؤهلاً للمتابعة. الجلسة تبقى مفتوحة كما كانت تماماً.
+            # التردد لا يحسم شيئاً - تُسجَّل الإشارة والصف يبقى كما هو،
+            # حالته price_quoted (لم تُجب بعد) ومؤهلاً للمتابعة.
+            # الجلسة تبقى مفتوحة كما كانت تماماً.
             if lead_id:
-                record_status_reason(lead_id, REASON_HESITANT)
+                record_hesitation(lead_id)
             return HESITANT_REPLY, rule_branch
 
         return "هل ترغبين بتأكيد حجز موعد؟ (نعم / لا)", rule_branch
@@ -164,7 +175,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
         )
         session_store.update_session(
             user_id,
-            state="awaiting_booking_confirmation",
+            state=session_store.STATE_AWAITING_BOOKING_REPLY,
             service=service,
             lead_id=lead_id,
         )

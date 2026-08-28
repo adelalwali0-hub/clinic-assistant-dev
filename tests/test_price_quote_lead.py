@@ -4,8 +4,8 @@
 تغطي ثلاث طبقات:
   1) record_price_quote في leads_store: الإنشاء، الـidempotency لكل
      نيّة تجارية مفتوحة، والتفريق بين الخدمة/الهوية.
-  2) record_booking_request وrecord_status_reason: تحديث نفس الصف
-     عبر lead_id بدل إنشاء صف ثانٍ.
+  2) record_booking_request وrecord_decline: تحديث نفس الصف عبر
+     lead_id بدل إنشاء صف ثانٍ.
   3) business_logic.handle_message: أن lead_id المحفوظ في الجلسة
      يصل فعلاً من عرض السعر حتى الحجز أو الرفض أو التردد، وأن السقوط
      الآمن لـsave_lead يعمل حين لا تحمل الجلسة lead_id.
@@ -20,14 +20,20 @@ import leads_store
 from leads_store import (
     FIELDNAMES,
     LEAD_ID_COLUMN,
+    OUTCOME_ORGANIC,
+    OUTCOME_PENDING,
+    OUTCOME_RECOVERED,
     REASON_BOOKING_REQUESTED,
     REASON_DECLINED,
     REASON_HESITANT,
     REASON_PRICE_QUOTED,
+    STATE_BOOKING_REQUESTED,
+    STATE_DECLINED,
+    STATE_PRICE_QUOTED,
     STATUS_REASON_COLUMN,
     record_booking_request,
+    record_decline,
     record_price_quote,
-    record_status_reason,
 )
 
 import business_logic
@@ -76,17 +82,17 @@ def frozen_clock(monkeypatch):
 
 # ------------------------------------------- 1) record_price_quote (leads_store)
 
-def test_record_price_quote_writes_not_ready_row_with_price_quoted_reason():
+def test_record_price_quote_writes_price_quoted_row():
     lead_id = record_price_quote(user_id="700", service_name=SERVICE_BOTOX, channel="telegram")
 
     rows = read_rows()
     assert len(rows) == 1
     row = rows[0]
     assert row[LEAD_ID_COLUMN] == lead_id
-    assert row["الحالة"] == "not_ready"
+    assert row["الحالة"] == STATE_PRICE_QUOTED
     assert row[STATUS_REASON_COLUMN] == REASON_PRICE_QUOTED
     assert row["مرحلة المتابعة"] == "0"
-    assert row["نتيجة المتابعة"] == ""
+    assert row["نتيجة المتابعة"] == OUTCOME_PENDING
     assert row["بيانات التواصل"] == ""
 
 
@@ -151,7 +157,7 @@ def test_record_price_quote_picks_most_recent_open_lead_when_duplicates_exist(is
     older = {
         LEAD_ID_COLUMN: "ld_older", "التاريخ والوقت": "2026-08-20 09:00:00",
         "معرف العميل": "709", "القناة": "telegram", "الخدمة المطلوبة": SERVICE_BOTOX,
-        "الحالة": "not_ready", STATUS_REASON_COLUMN: REASON_PRICE_QUOTED,
+        "الحالة": STATE_PRICE_QUOTED, STATUS_REASON_COLUMN: REASON_PRICE_QUOTED,
         "بيانات التواصل": "", "سعر الخدمة وقت الإنشاء": SERVICE_BOTOX_PRICE,
         "مرحلة المتابعة": "0", "تاريخ آخر متابعة": "", "نتيجة المتابعة": "",
     }
@@ -164,7 +170,7 @@ def test_record_price_quote_picks_most_recent_open_lead_when_duplicates_exist(is
     assert len(read_rows()) == 2
 
 
-# ------------------------------- 2) تحديث نفس الصف (record_booking_request / record_status_reason)
+# ------------------------------- 2) تحديث نفس الصف (record_booking_request / record_decline)
 
 def test_record_booking_request_updates_same_row_and_marks_closed():
     lead_id = record_price_quote(user_id="710", service_name=SERVICE_BOTOX, channel="telegram")
@@ -174,10 +180,10 @@ def test_record_booking_request_updates_same_row_and_marks_closed():
     assert len(rows) == 1
     row = rows[0]
     assert row[LEAD_ID_COLUMN] == lead_id
-    assert row["الحالة"] == "confirmed"
+    assert row["الحالة"] == STATE_BOOKING_REQUESTED
     assert row[STATUS_REASON_COLUMN] == REASON_BOOKING_REQUESTED
     assert row["بيانات التواصل"] == "سارة 0770"
-    assert row["نتيجة المتابعة"] == "أُغلق"
+    assert row["نتيجة المتابعة"] == OUTCOME_ORGANIC
 
 
 def test_record_booking_request_marks_recovered_after_followup():
@@ -187,8 +193,8 @@ def test_record_booking_request_marks_recovered_after_followup():
     assert record_booking_request(lead_id=lead_id, contact_info="سارة 0770") is True
 
     row = read_rows()[0]
-    assert row["نتيجة المتابعة"] == "مسترجَع"
-    assert leads_store.compute_recovery_metrics()["leads_recovered"] == 1
+    assert row["نتيجة المتابعة"] == OUTCOME_RECOVERED
+    assert leads_store.compute_funnel_metrics()["recovered_leads"] == 1
 
 
 def test_record_booking_request_returns_false_for_unknown_lead_id():
@@ -198,20 +204,25 @@ def test_record_booking_request_returns_false_for_unknown_lead_id():
     assert record_booking_request(lead_id="", contact_info="سارة") is False
 
     row = read_rows()[0]
-    assert row["الحالة"] == "not_ready"
+    assert row["الحالة"] == STATE_PRICE_QUOTED
 
 
-def test_record_status_reason_declined_keeps_status_not_ready():
+def test_record_decline_moves_state_and_keeps_lead_followup_eligible():
+    """
+    الرفض الصريح صار حالة أولى الدرجة (§7)، لا سبباً في حقل جانبي.
+    والصف يبقى مؤهلاً للمتابعة كما كان بالضبط (D-015 - تأجيل صريح).
+    """
     lead_id = record_price_quote(user_id="713", service_name=SERVICE_BOTOX, channel="telegram")
 
-    assert record_status_reason(lead_id, REASON_DECLINED) is True
+    assert record_decline(lead_id) is True
 
     rows = read_rows()
     assert len(rows) == 1
     row = rows[0]
-    assert row["الحالة"] == "not_ready"
+    assert row["الحالة"] == STATE_DECLINED
+    assert row["الحالة"] in leads_store.OPEN_STATES
     assert row[STATUS_REASON_COLUMN] == REASON_DECLINED
-    assert row["نتيجة المتابعة"] == ""
+    assert row["نتيجة المتابعة"] == OUTCOME_PENDING
 
 
 def test_price_quoted_lead_becomes_eligible_for_followup_after_window(frozen_clock, monkeypatch):
@@ -234,11 +245,11 @@ def test_handle_message_price_inquiry_creates_lead_and_stores_id_in_session():
     rows = read_rows()
     assert len(rows) == 1
     row = rows[0]
-    assert row["الحالة"] == "not_ready"
+    assert row["الحالة"] == STATE_PRICE_QUOTED
     assert row[STATUS_REASON_COLUMN] == REASON_PRICE_QUOTED
 
     session = session_store.get_session("800")
-    assert session["state"] == "awaiting_booking_confirmation"
+    assert session["state"] == session_store.STATE_AWAITING_BOOKING_REPLY
     assert session["lead_id"] == row[LEAD_ID_COLUMN]
 
 
@@ -253,11 +264,11 @@ def test_handle_message_confirm_and_contact_info_updates_same_row():
     assert len(rows) == 1
     row = rows[0]
     assert row[LEAD_ID_COLUMN] == lead_id
-    assert row["الحالة"] == "confirmed"
+    assert row["الحالة"] == STATE_BOOKING_REQUESTED
     assert row[STATUS_REASON_COLUMN] == REASON_BOOKING_REQUESTED
     assert row["بيانات التواصل"] == "سارة 0770 000 000"
 
-    assert session_store.get_session("801")["state"] == "idle"
+    assert session_store.get_session("801")["state"] == session_store.STATE_IDLE
 
 
 def test_handle_message_decline_updates_same_row_no_new_lead():
@@ -270,10 +281,10 @@ def test_handle_message_decline_updates_same_row_no_new_lead():
     assert len(rows) == 1
     row = rows[0]
     assert row[LEAD_ID_COLUMN] == lead_id
-    assert row["الحالة"] == "not_ready"
+    assert row["الحالة"] == STATE_DECLINED
     assert row[STATUS_REASON_COLUMN] == REASON_DECLINED
 
-    assert session_store.get_session("802")["state"] == "idle"
+    assert session_store.get_session("802")["state"] == session_store.STATE_IDLE
 
 
 def test_handle_message_hesitant_then_confirm_uses_same_lead():
@@ -281,8 +292,10 @@ def test_handle_message_hesitant_then_confirm_uses_same_lead():
     lead_id = session_store.get_session("803")["lead_id"]
 
     handle_message(make_message("803", "خلي أفكر"))
-    assert session_store.get_session("803")["state"] == "awaiting_booking_confirmation"
+    assert session_store.get_session("803")["state"] == session_store.STATE_AWAITING_BOOKING_REPLY
     assert read_rows()[0][STATUS_REASON_COLUMN] == REASON_HESITANT
+    # التردد إشارة لا حالة: الـLead يبقى price_quoted (لم تُجب بعد)
+    assert read_rows()[0]["الحالة"] == STATE_PRICE_QUOTED
 
     handle_message(make_message("803", "نعم"))
     handle_message(make_message("803", "سارة 0770"))
@@ -291,12 +304,14 @@ def test_handle_message_hesitant_then_confirm_uses_same_lead():
     assert len(rows) == 1
     row = rows[0]
     assert row[LEAD_ID_COLUMN] == lead_id
-    assert row["الحالة"] == "confirmed"
+    assert row["الحالة"] == STATE_BOOKING_REQUESTED
 
 
 def test_handle_message_contact_info_without_session_lead_id_falls_back_to_save_lead():
     service = find_service("بوتوكس")
-    session_store.update_session("804", state="awaiting_contact_info", service=service)
+    session_store.update_session(
+        "804", state=session_store.STATE_AWAITING_CONTACT_INFO, service=service
+    )
     assert session_store.get_session("804")["lead_id"] is None
 
     handle_message(make_message("804", "سارة 0770"))
@@ -304,6 +319,6 @@ def test_handle_message_contact_info_without_session_lead_id_falls_back_to_save_
     rows = read_rows()
     assert len(rows) == 1
     row = rows[0]
-    assert row["الحالة"] == "confirmed"
+    assert row["الحالة"] == STATE_BOOKING_REQUESTED
     assert row["بيانات التواصل"] == "سارة 0770"
     assert row[STATUS_REASON_COLUMN] == ""
