@@ -1,9 +1,10 @@
 """
 عزل الاختبارات عن البيانات الحية.
 
-كل اختبار يعمل داخل tmp_path خاص به: leads.csv والقفل والنسخة
-الاحتياطية كلها هناك. ملف leads.csv الحقيقي في جذر المشروع لا
-يُقرأ ولا يُكتب ولا يُنشأ من الاختبارات إطلاقاً.
+كل اختبار يعمل داخل tmp_path خاص به: leads.csv والقفل والنسخ
+الاحتياطية وملف الجلسات كلها هناك. الملفات الحقيقية في جذر المشروع
+(leads.csv و data/sessions.json) لا تُقرأ ولا تُكتب ولا تُنشأ من
+الاختبارات إطلاقاً.
 """
 
 import sys
@@ -17,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import leads_store  # noqa: E402
+from storage import session_store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -34,4 +36,25 @@ def isolated_leads_file(tmp_path, monkeypatch):
     monkeypatch.setattr(leads_store, "LEADS_FILE", str(leads_file))
     monkeypatch.setattr(leads_store, "LOCK_FILE", str(leads_file) + ".lock")
     monkeypatch.setattr(leads_store, "BACKUP_FILE", str(leads_file) + ".backup-pre-lead-id")
+    monkeypatch.setattr(
+        leads_store, "BACKUP_FILE_PRICE_QUOTE", str(leads_file) + ".backup-pre-price-quote-lead"
+    )
     return leads_file
+
+
+@pytest.fixture(autouse=True)
+def isolated_sessions_file(tmp_path, monkeypatch):
+    """
+    يوجّه session_store إلى tmp_path كذلك.
+
+    ضروري منذ أن صارت اختبارات business_logic تمرّ بشجرة القرار: هي
+    تستدعي update_session/clear_session، وبلا هذا العزل كانت ستكتب في
+    data/sessions.json الحقيقي في جذر المشروع - أي تفسد جلسات عميلات
+    حقيقيات وسط محادثة جارية.
+
+    autouse لنفس سبب العزل الأول: لا يُنسى.
+    """
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(session_store, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(session_store, "SESSIONS_FILE", str(data_dir / "sessions.json"))
+    return data_dir / "sessions.json"

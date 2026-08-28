@@ -135,6 +135,7 @@ import leads_store
 leads_store.LEADS_FILE = sys.argv[2]
 leads_store.LOCK_FILE = sys.argv[2] + ".lock"
 leads_store.BACKUP_FILE = sys.argv[2] + ".backup-pre-lead-id"
+leads_store.BACKUP_FILE_PRICE_QUOTE = sys.argv[2] + ".backup-pre-price-quote-lead"
 rows = leads_store._read_all_rows()
 print("RESULT:" + json.dumps([r["lead_id"] for r in rows]))
 """
