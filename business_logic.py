@@ -50,6 +50,22 @@ ReplyDecision (نص + variant_id + lead_id + rule_decision) بدل زوج،
 محسومة) كان سيُدخل صفوفاً بلا خدمة إلى مقام كل نسبة تحويل ويُفسد
 القياس الذي تقوم عليه البوابة. القرار مسجَّل في D-017.
 
+[التغيير #7 - فخ awaiting_contact_info | F9] أي رسالة تصل والجلسة
+تنتظر بيانات التواصل كانت تُؤخذ حرفياً كبيانات تواصل وتُنشئ صف حجز:
+«شنو يعني بالضبط؟» كانت تُسجَّل طلب حجز ببيانات تواصل = نص السؤال.
+هذا **تلفيق** داخل leads.csv - الملف الذي تفترض بوابة Gate A أنه
+جدير بالثقة - لا فقدان بيانات.
+
+الآن تُقبل الرسالة كبيانات تواصل إذا حملت 9 أرقام فأكثر (القاعدة
+وحدودها المعروفة في contact_info.py). دون ذلك: لا صف، ولا حدث، ولا
+تغيير حالة - إعادة سؤال مسجَّلة (contact_info_reprompt.v1). ورسالة
+بلا أي رقم تُحفَظ اسماً مبدئياً في الجلسة وتُدمَج مع الرقم التالي،
+فلا يصل الصف برقم بلا اسم.
+
+ثغرة معروفة ومؤجَّلة (D-019): تغيير الموضوع داخل هذه الحالة - «طيب كم
+سعر الليزر؟» - لا يحمل أرقاماً فيتلقى إعادة السؤال لا سعراً، حتى
+تُفرِج عنه مهلة الجلسة.
+
 [ai_intent لا يُقرأ في أي من الفرعين الجديدين]
 كشف الغموض قرار قواعد ثابتة بالكامل - كالسعر تماماً (Phase 3B تحصر
 تأثير AI في confirm_booking/decline/hesitant وحدها). لا سطر أدناه في
@@ -80,6 +96,7 @@ In-Memory فقط كما كان (لا يُحفَظ على القرص - قيمة �
 
 import re
 
+import contact_info
 import events
 import matching
 import variants
@@ -125,10 +142,10 @@ AMBIGUITY_SOURCE_KEYWORD_MULTIPLICITY = "keyword_multiplicity"
 
 RULE_DECISION_AMBIGUOUS_SERVICE = "ambiguous_service"
 
-# الأرقام الهندية العربية (٠-٩) وامتدادها الفارسي (۰-۹) إلى ASCII.
-# العميلة ترسل «٢» من لوحة مفاتيح عربية بينما القائمة معروضة بـ«2»؛
-# رفض جوابها لاختلاف الرسم وحده يجعل سؤال التوضيح عائقاً لا مساعدة.
-_ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+# [التغيير #7] وصلت رسالة والجلسة تنتظر بيانات التواصل، لكنها لا تحمل
+# رقماً كافياً. قيمة تشخيصية للمقارنة: لا حجز وقع ولا رفض - النظام
+# أعاد السؤال فقط.
+RULE_DECISION_CONTACT_INFO_MISSING = "contact_info_missing"
 
 _BARE_NUMBER = re.compile(r"[0-9]+")
 
@@ -140,9 +157,56 @@ def _bare_number(text: str) -> int | None:
     الاشتراط مقصود: «2» جواب على القائمة، بينما «عندي 2 جلسات ليزر»
     ليست اختياراً للخيار الثاني. رسالة تحمل رقماً وسط كلام تُترك
     لقاعدة المطابقة بعدها.
+
+    الأرقام الهندية العربية تُترجَم أولاً: العميلة ترسل «٢» من لوحة
+    مفاتيح عربية بينما القائمة معروضة بـ«2»، ورفض جوابها لاختلاف
+    الرسم وحده يجعل سؤال التوضيح عائقاً لا مساعدة.
     """
-    stripped = text.strip().translate(_ARABIC_INDIC_DIGITS)
+    stripped = matching.to_ascii_digits(text.strip())
     return int(stripped) if _BARE_NUMBER.fullmatch(stripped) else None
+
+
+def _join_contact_parts(provisional_name: str | None, contact_text: str) -> str:
+    """
+    يدمج الاسم المبدئي - إن وُجد - مع الرسالة الحاملة للرقم.
+
+    الاسم أولاً لأن هذا هو الشكل المطلوب في ask_contact_info.v1 («اسمك
+    ورقم هاتفك»)، فيقرأ موظف العيادة الصف بنفس الترتيب في الحالتين:
+    من أرسلت الاثنين معاً، ومن أرسلتهما في رسالتين.
+    """
+    name = (provisional_name or "").strip()
+    return f"{name} {contact_text}".strip() if name else contact_text
+
+
+def _ask_for_contact_info_again(message: IncomingMessage, session: dict) -> ReplyDecision:
+    """
+    الرسالة لا تحمل رقماً كافياً: **لا صف، ولا حدث، ولا تغيير حالة**.
+    هذا هو قلب إغلاق F9 - قبله كانت هذه الرسالة بالذات تُنشئ صف حجز
+    ببيانات تواصل = نص سؤال العميلة.
+
+    رسالة بلا أي رقم تُحفَظ اسماً مبدئياً (انظر contact_info): كثيرات
+    يرسلن الاسم أولاً، ونسيانه يجعل الصف يحمل رقماً بلا اسم. الحفظ
+    يعدّل حقلاً واحداً في الجلسة ولا يمسّ `state` - فالمحادثة تبقى حيث
+    هي، والجلسة لا «تتقدّم» بردٍّ لم يكن جواباً.
+
+    رسالة تحمل أرقاماً أقل من الحد ليست اسماً: محاولة رقم ناقصة، لا
+    تُحفَظ حتى لا تمحو اسماً صحيحاً سبقها.
+
+    `lead_id` يُمرَّر إلى الرد فيصير RESPONSE_SENT محمولاً على الـLead
+    نفسه: «كم مرة أعدنا سؤال هذه العميلة؟» مُجاب عنه من events.jsonl
+    وحده، بلا حدث جديد - إعادة السؤال رسالة صادرة، وللرسائل الصادرة
+    حدثها منذ التغيير #5.
+    """
+    if contact_info.looks_like_a_name(message.text.strip()):
+        session_store.update_session(
+            message.user_id, provisional_name=message.text.strip()
+        )
+    return ReplyDecision(
+        text=variants.render("contact_info_reprompt.v1"),
+        variant_id="contact_info_reprompt.v1",
+        lead_id=session.get("lead_id"),
+        rule_decision=RULE_DECISION_CONTACT_INFO_MISSING,
+    )
 
 
 def _price_reply(message: IncomingMessage, service: dict) -> ReplyDecision:
@@ -330,8 +394,14 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
     session = session_store.get_session(user_id)
 
     if session["state"] == session_store.STATE_AWAITING_CONTACT_INFO:
+        if not contact_info.looks_like_contact_info(text):
+            return _ask_for_contact_info_again(message, session)
+
         service_name = session["service"]["name"]
         lead_id = session.get("lead_id")
+        # الاسم المرسَل وحده قبل الرقم يُدمَج معه هنا، فيصل الصف كاملاً
+        # (اسم + رقم) بدل رقم بلا اسم تعمل عليه العيادة يدوياً.
+        text = _join_contact_parts(session.get("provisional_name"), text)
         session_store.clear_session(user_id)
         if not (lead_id and record_booking_request(lead_id=lead_id, contact_info=text)):
             # سقوط آمن: جلسة بدأت قبل هذا التغيير فلا تحمل lead_id، أو

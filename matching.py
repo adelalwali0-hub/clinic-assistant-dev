@@ -46,6 +46,16 @@ MIN_LENGTH_FOR_CLITIC_PREFIX = 3
 
 _TOKEN_SEPARATOR = re.compile(r"\W+", re.UNICODE)
 
+# الأرقام الهندية العربية (٠-٩) وامتدادها الفارسي (۰-۹) إلى ASCII.
+# العميلة تكتب من لوحة مفاتيح عربية بينما كل قراءة للأرقام في النظام
+# تفترض ASCII؛ بلا هذه الترجمة يصير رقم هاتفها الحقيقي «بلا أرقام».
+_ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def to_ascii_digits(text: str) -> str:
+    """النص نفسه بأرقامه العربية/الفارسية مترجمةً إلى ASCII، بلا تغيير آخر."""
+    return text.translate(_ARABIC_INDIC_DIGITS)
+
 
 def normalize_arabic(text: str) -> str:
     """

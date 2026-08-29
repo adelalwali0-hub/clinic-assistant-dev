@@ -56,11 +56,18 @@ _LEGACY_STATES = {"awaiting_booking_confirmation": STATE_AWAITING_BOOKING_REPLY}
 # لا هجرة لهذا الحقل ولا نسخة احتياطية: غيابه من جلسة قديمة يعني
 # «لا خيارات معروضة»، وهو ما تقوله None بالضبط - فيُقرأ في كل موضع
 # بصيغة `session.get("service_options") or []`.
+# provisional_name: اسم أرسلته العميلة وحده قبل رقمها، بانتظار الرقم
+# ليُدمَجا في بيانات تواصل واحدة. يعيش داخل awaiting_contact_info فقط،
+# ولا يُكتب في أي صف بمفرده: صف بيانات تواصل باسم بلا رقم لا تستطيع
+# العيادة العمل عليه. None في الجلسات الافتراضية وفي أي جلسة بدأت قبل
+# إضافة هذا الحقل، ويُقرأ في كل موضع بصيغة
+# `session.get("provisional_name")`.
 DEFAULT_SESSION = {
     "state": STATE_IDLE,
     "service": None,
     "lead_id": None,
     "service_options": None,
+    "provisional_name": None,
 }
 
 _lock = threading.Lock()

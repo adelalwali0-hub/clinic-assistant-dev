@@ -298,7 +298,7 @@ def test_handle_message_hesitant_then_confirm_uses_same_lead():
     assert read_rows()[0]["الحالة"] == STATE_PRICE_QUOTED
 
     handle_message(make_message("803", "نعم"))
-    handle_message(make_message("803", "سارة 0770"))
+    handle_message(make_message("803", "سارة 07701234567"))
 
     rows = read_rows()
     assert len(rows) == 1
@@ -314,11 +314,11 @@ def test_handle_message_contact_info_without_session_lead_id_falls_back_to_save_
     )
     assert session_store.get_session("804")["lead_id"] is None
 
-    handle_message(make_message("804", "سارة 0770"))
+    handle_message(make_message("804", "سارة 07701234567"))
 
     rows = read_rows()
     assert len(rows) == 1
     row = rows[0]
     assert row["الحالة"] == STATE_BOOKING_REQUESTED
-    assert row["بيانات التواصل"] == "سارة 0770"
+    assert row["بيانات التواصل"] == "سارة 07701234567"
     assert row[STATUS_REASON_COLUMN] == ""

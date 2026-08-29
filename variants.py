@@ -121,6 +121,17 @@ _LIVE_VARIANTS = [
         intent="ask_contact_info",
         template="ممتاز! الرجاء إرسال اسمك ورقم هاتفك في رسالة واحدة لتأكيد الحجز.",
     ),
+    # [التغيير #7 - F9] تُرسَل حين تصل رسالة والجلسة تنتظر بيانات
+    # التواصل لكنها لا تحمل رقماً كافياً. المثال في النص مقصود: يوضّح
+    # الشكل المطلوب بلا شرح، فتقلّ دورة إعادة السؤال.
+    Variant(
+        variant_id="contact_info_reprompt.v1",
+        intent="contact_info_reprompt",
+        template=(
+            "حتى أكمل حجزك أحتاج رقم هاتفك 🌸\n"
+            "ترسلين اسمك ورقمك في رسالة وحدة، مثل: سارة 07701234567"
+        ),
+    ),
     Variant(
         variant_id="decline_ack.v1",
         intent="decline_ack",

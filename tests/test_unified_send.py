@@ -297,7 +297,7 @@ def test_marking_outside_the_send_path_leaves_variant_empty():
     ("v1", ["شلونكم؟"], "services_list.v1"),
     ("v2", ["كم سعر البوتوكس؟"], "price_quote.v1"),
     ("v3", ["بوتوكس", "نعم"], "ask_contact_info.v1"),
-    ("v4", ["بوتوكس", "نعم", "سارة 0770"], "booking_request_ack.v1"),
+    ("v4", ["بوتوكس", "نعم", "سارة 07701234567"], "booking_request_ack.v1"),
     ("v5", ["بوتوكس", "لا"], "decline_ack.v1"),
     ("v6", ["بوتوكس", "خلي أفكر"], "hesitant_ack.v1"),
     ("v7", ["بوتوكس", "شنو يعني؟"], "booking_reply_reprompt.v1"),
@@ -422,8 +422,8 @@ def test_today_every_intent_has_exactly_one_variant():
     for variant_id in variants.all_variant_ids():
         per_intent.setdefault(variants.intent_of(variant_id), []).append(variant_id)
     assert all(len(ids) == 1 for ids in per_intent.values())
-    # 10 + نيّتا كشف الغموض (التغيير #6): ambiguity_question، ambiguity_reprompt
-    assert len(per_intent) == 12
+    # 10 + نيّتا كشف الغموض (التغيير #6) + إعادة سؤال بيانات التواصل (#7)
+    assert len(per_intent) == 13
 
 
 def test_template_hash_changes_when_the_template_changes():
