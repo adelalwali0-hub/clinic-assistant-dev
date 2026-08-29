@@ -33,6 +33,28 @@ ReplyDecision (نص + variant_id + lead_id + rule_decision) بدل زوج،
 هذا ليس اختياراً بين صياغات: لكل نية صياغة واحدة اليوم، ومنطق
 الاختيار خارج نطاق هذا التغيير (§16 - لا توليد، لا اختيار آلي).
 
+[التغيير #6 - كشف الغموض | F6/S2/D5] رسالة تطابق أكثر من خدمة كانت
+تُسعَّر بسعر **أولى** المطابقات بترتيب الإعداد: اختيار صامت لا يظهر في
+أي سجل، ولا تعرف العميلة أنه وقع. الآن يتفرّع مسار idle على **عدد**
+المطابقات:
+  1     - مسار السعر كما كان حرفياً.
+  0     - قائمة الخدمات كما كانت حرفياً.
+  2 فأكثر - سؤال توضيح: أسماء المرشَّحين مرقَّمة، بلا سعر، والجلسة
+            تنتقل إلى awaiting_service_disambiguation.
+
+[لا Lead عند سؤال التوضيح - قرار صريح بكلفته]
+لا يُكتب صف في leads.csv عند سؤال التوضيح؛ الـLead يُنشأ عند السعر
+وحده عبر record_price_quote كما هو (D1). الكلفة مقبولة ومعروفة:
+العميلة التي تُسأل ثم تصمت لا تترك صفاً ولا تدخل دورة المتابعة - هي
+مرئية في events.jsonl عبر AMBIGUITY_ASKED وحده. البديل (صف بلا خدمة
+محسومة) كان سيُدخل صفوفاً بلا خدمة إلى مقام كل نسبة تحويل ويُفسد
+القياس الذي تقوم عليه البوابة. القرار مسجَّل في D-017.
+
+[ai_intent لا يُقرأ في أي من الفرعين الجديدين]
+كشف الغموض قرار قواعد ثابتة بالكامل - كالسعر تماماً (Phase 3B تحصر
+تأثير AI في confirm_booking/decline/hesitant وحدها). لا سطر أدناه في
+المسار الجديد يقرأ ai_intent.
+
 هذا هو مصدر الحقيقة الوحيد (Business Truth): القرارات، الأسعار،
 الحجوزات، الـLeads - في كل الحالات، بما فيها Phase 3B.
 
@@ -56,9 +78,19 @@ rule_decision المُرجَع دائماً يعكس القرار الذي كا�
 In-Memory فقط كما كان (لا يُحفَظ على القرص - قيمة تشخيصية مؤقتة).
 """
 
+import re
+
+import events
+import matching
 import variants
 from channel_interface import IncomingMessage, ReplyDecision
-from services import CENTER_NAME, find_service, services_list_text
+from services import (
+    CENTER_NAME,
+    find_service_by_name,
+    find_services,
+    service_options_text,
+    services_list_text,
+)
 from leads_store import (
     STATE_BOOKING_REQUESTED,
     STATE_DECLINED,
@@ -82,6 +114,187 @@ HESITANT_WORDS = [
 ]
 
 AI_OVERRIDE_ALLOWED = {"confirm_booking", "decline", "hesitant"}
+
+# سبب الغموض المُسجَّل في الحدث. اليوم مصدر واحد: تعدد الخدمات
+# المطابقة لكلمات الرسالة. الحقل موجود منذ أول حدث ليُميَّز لاحقاً بين
+# مصادر غموض أخرى دون أن ينقسم شكل السجل إلى ما قبل وما بعد.
+AMBIGUITY_SOURCE_KEYWORD_MULTIPLICITY = "keyword_multiplicity"
+
+RULE_DECISION_AMBIGUOUS_SERVICE = "ambiguous_service"
+
+# الأرقام الهندية العربية (٠-٩) وامتدادها الفارسي (۰-۹) إلى ASCII.
+# العميلة ترسل «٢» من لوحة مفاتيح عربية بينما القائمة معروضة بـ«2»؛
+# رفض جوابها لاختلاف الرسم وحده يجعل سؤال التوضيح عائقاً لا مساعدة.
+_ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+_BARE_NUMBER = re.compile(r"[0-9]+")
+
+
+def _bare_number(text: str) -> int | None:
+    """
+    الرقم إن كانت الرسالة **رقماً مجرداً** لا غير، وإلا None.
+
+    الاشتراط مقصود: «2» جواب على القائمة، بينما «عندي 2 جلسات ليزر»
+    ليست اختياراً للخيار الثاني. رسالة تحمل رقماً وسط كلام تُترك
+    لقاعدة المطابقة بعدها.
+    """
+    stripped = text.strip().translate(_ARABIC_INDIC_DIGITS)
+    return int(stripped) if _BARE_NUMBER.fullmatch(stripped) else None
+
+
+def _price_reply(message: IncomingMessage, service: dict) -> ReplyDecision:
+    """
+    مسار السعر - منطقه لم يتغيّر عمّا كان في فرع idle حرفياً: إنشاء
+    الـLead لحظة الرد بالسعر (D1)، حفظ lead_id في الجلسة، ثم
+    price_quote.v1.
+
+    يعيش في دالة واحدة لأن له الآن مدخلين (تطابق وحيد من idle، وحسم
+    الغموض بعد سؤال التوضيح) ويجب أن يبقيا فعلاً واحداً: مدخل ثانٍ
+    ينسخ هذه الخطوات كان سيصير مسار سعر لا يُنشئ Lead بعد أول تعديل.
+
+    `service_options=None` تُمسح هنا صراحةً: الخيارات المعروضة انتهت
+    مهمتها لحظة حسم الخدمة، وبقاؤها في الجلسة يجعل رقماً يُرسَل بعد
+    ذلك يعني شيئاً في محادثة لم تعد تعرض قائمة.
+    """
+    lead_id = record_price_quote(
+        user_id=message.user_id,
+        service_name=service["name"],
+        channel=message.channel,
+    )
+    session_store.update_session(
+        message.user_id,
+        state=session_store.STATE_AWAITING_BOOKING_REPLY,
+        service=service,
+        lead_id=lead_id,
+        service_options=None,
+    )
+    return ReplyDecision(
+        text=variants.render(
+            "price_quote.v1",
+            service_name=service["name"],
+            center_name=CENTER_NAME,
+            price=service["price"],
+        ),
+        variant_id="price_quote.v1",
+        lead_id=lead_id,
+        rule_decision="price_inquiry",
+    )
+
+
+def _ask_which_service(message: IncomingMessage, candidates: list[dict]) -> ReplyDecision:
+    """
+    سؤال التوضيح: تنتقل الجلسة إلى انتظار الاختيار، ثم يُصدَر
+    AMBIGUITY_ASKED، ثم يُرسَل السؤال.
+
+    الترتيب مقصود وهو نفس اصطلاح leads_store: الحدث يُصدَر **بعد**
+    نجاح التحديث وحده. update_session كتابة ذرّية ترمي عند الفشل، فلا
+    يُكتب في السجل ادّعاء بسؤال لم تنتقل الجلسة لأجله. والاتجاه المختار
+    عند الفشل هو ذاته: الحالة قد تسبق الحدث، ولا يسبقه العكس.
+
+    لا Lead هنا و`lead_id=""` في الحدث - لا صف يُنسَب إليه بعد.
+    """
+    candidate_names = [service["name"] for service in candidates]
+
+    session_store.update_session(
+        message.user_id,
+        state=session_store.STATE_AWAITING_SERVICE_DISAMBIGUATION,
+        service_options=candidate_names,
+    )
+    events.emit(
+        events.AMBIGUITY_ASKED,
+        lead_id="",
+        channel=message.channel,
+        # نص الرسالة الوارد **لا** يُنسَخ هنا: سجل بالإلحاق فقط لا
+        # يُحذف منه شيء، وأسماء المرشَّحين تكفي لكل تحليل لاحق
+        # (أي خدمات تتزاحم، وكم مرة).
+        payload={
+            "user_id": message.user_id,
+            "candidates": candidate_names,
+            "candidate_count": len(candidate_names),
+            "source": AMBIGUITY_SOURCE_KEYWORD_MULTIPLICITY,
+        },
+    )
+    return ReplyDecision(
+        text=variants.render(
+            "ambiguity_question.v1",
+            options_list=service_options_text(candidate_names),
+        ),
+        variant_id="ambiguity_question.v1",
+        lead_id=None,
+        rule_decision=RULE_DECISION_AMBIGUOUS_SERVICE,
+    )
+
+
+def _reprompt_which_service(option_names: list[str]) -> ReplyDecision:
+    """
+    إعادة السؤال بنفس الخيارات المعروضة سابقاً - بلا حدث جديد: لم
+    يتغيّر شيء في مجموعة المرشَّحين، وإصدار AMBIGUITY_ASKED مرة أخرى
+    كان سيجعل عدّ «كم مرة وقع غموض» يعدّ محاولات الفهم لا حالات الغموض.
+    """
+    return ReplyDecision(
+        text=variants.render(
+            "ambiguity_reprompt.v1",
+            options_list=service_options_text(option_names),
+        ),
+        variant_id="ambiguity_reprompt.v1",
+        lead_id=None,
+        rule_decision=RULE_DECISION_AMBIGUOUS_SERVICE,
+    )
+
+
+def _resolve_disambiguation(message: IncomingMessage, session: dict) -> ReplyDecision:
+    """
+    حسم سؤال التوضيح. ثلاث قواعد بترتيب ثابت، وأول قاعدة تحسم تفوز:
+
+      1) رقم مجرد داخل مدى القائمة -> الخيار المقابل. أرخص جواب على
+         العميلة وأقلّه التباساً، فيُجرَّب أولاً.
+      2) مطابقة بحدود الكلمة على **المرشَّحين وحدهم** (كلماتهم
+         المفتاحية + أسماؤهم). حصر النطاق هو المقصود: «الوجه» قد تطابق
+         خدمات كثيرة في الكتالوج، لكن المحادثة الجارية تدور حول ثلاث.
+         تطابق وحيد -> السعر؛ أكثر من واحد -> إعادة السؤال بلا حدث.
+      3) الكتالوج كاملاً - تغيير الموضوع وسط التوضيح. العميلة التي
+         سُئلت عن الليزر ثم كتبت «بوتوكس» غيّرت سؤالها، ولا يصح أن
+         يُقرأ جوابها داخل قائمة لم تعد تعنيها. واحدة -> السعر؛ أكثر
+         -> سؤال توضيح **جديد** بمرشَّحين جدد (وحدث جديد: هذا غموض
+         آخر)؛ صفر -> إعادة السؤال بالخيارات القائمة.
+
+    خيار محفوظ اختفى اسمه من الإعداد (خدمة حُذفت وسط المحادثة) لا
+    يُسعَّر ولا يُختلَق له سعر: يسقط إلى قاعدة الكتالوج (3).
+
+    ai_intent لا يُقرأ هنا إطلاقاً - انظر ترويسة الملف.
+    """
+    text = message.text.strip()
+    option_names = session.get("service_options") or []
+
+    # (1) رقم مجرد
+    number = _bare_number(text)
+    if number is not None and 1 <= number <= len(option_names):
+        chosen = find_service_by_name(option_names[number - 1])
+        if chosen is not None:
+            return _price_reply(message, chosen)
+
+    # (2) مطابقة محصورة بالمرشَّحين
+    live_options = [
+        service for service in
+        (find_service_by_name(name) for name in option_names)
+        if service is not None
+    ]
+    narrowed = [
+        service for service in live_options
+        if matching.matches_any(text, list(service["keywords"]) + [service["name"]])
+    ]
+    if len(narrowed) == 1:
+        return _price_reply(message, narrowed[0])
+    if len(narrowed) >= 2:
+        return _reprompt_which_service(option_names)
+
+    # (3) الكتالوج كاملاً
+    catalog_matches = find_services(text)
+    if len(catalog_matches) == 1:
+        return _price_reply(message, catalog_matches[0])
+    if len(catalog_matches) >= 2:
+        return _ask_which_service(message, catalog_matches)
+    return _reprompt_which_service(option_names)
 
 
 def get_session_state(user_id: str) -> str:
@@ -202,33 +415,20 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
             rule_decision=rule_branch,
         )
 
-    service = find_service(text)
-    if service:
+    if session["state"] == session_store.STATE_AWAITING_SERVICE_DISAMBIGUATION:
+        return _resolve_disambiguation(message, session)
+
+    # [التغيير #6] الفرع على **عدد** المطابقات لا على أولاها.
+    matched_services = find_services(text)
+
+    if len(matched_services) == 1:
         # PRD D1: الـLead يُنشأ هنا - لحظة الرد بالسعر - لا عند تسليم
         # البيانات. العميلة التي تسأل ثم تصمت تترك أثراً وتدخل دورة
         # المتابعة. lead_id يُحفظ في الجلسة ليُحدَّث نفس الصف لاحقاً.
-        lead_id = record_price_quote(
-            user_id=user_id,
-            service_name=service["name"],
-            channel=message.channel,
-        )
-        session_store.update_session(
-            user_id,
-            state=session_store.STATE_AWAITING_BOOKING_REPLY,
-            service=service,
-            lead_id=lead_id,
-        )
-        return ReplyDecision(
-            text=variants.render(
-                "price_quote.v1",
-                service_name=service["name"],
-                center_name=CENTER_NAME,
-                price=service["price"],
-            ),
-            variant_id="price_quote.v1",
-            lead_id=lead_id,
-            rule_decision="price_inquiry",
-        )
+        return _price_reply(message, matched_services[0])
+
+    if len(matched_services) >= 2:
+        return _ask_which_service(message, matched_services)
 
     # لا Lead هنا: لم يُذكر أي سعر ولم يُنشأ أي صف. lead_id=None حالة
     # صحيحة يتعامل معها مسار الإرسال، لا نقص فيه.

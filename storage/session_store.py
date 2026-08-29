@@ -39,12 +39,29 @@ STATE_IDLE = "idle"
 STATE_AWAITING_BOOKING_REPLY = "awaiting_booking_reply"
 STATE_AWAITING_CONTACT_INFO = "awaiting_contact_info"
 
+# [التغيير #6] رسالة العميلة طابقت أكثر من خدمة، فسُئلت أيّها تقصد
+# والنظام ينتظر جوابها. حالة انتظار **تسبق** عرض السعر - لا Lead بعد.
+STATE_AWAITING_SERVICE_DISAMBIGUATION = "awaiting_service_disambiguation"
+
 _LEGACY_STATES = {"awaiting_booking_confirmation": STATE_AWAITING_BOOKING_REPLY}
 
 # lead_id: معرّف صف الـLead الذي أُنشئ لحظة عرض السعر. تحمله الجلسة
 # ليُحدَّث نفس الصف عند كل رد لاحق. None في الجلسات الافتراضية وفي أي
 # جلسة بدأت قبل إضافة هذا الحقل - وهي حالة يتعامل معها business_logic.
-DEFAULT_SESSION = {"state": STATE_IDLE, "service": None, "lead_id": None}
+#
+# service_options: أسماء الخدمات المرشَّحة التي عُرضت على العميلة في
+# سؤال التوضيح، بترتيب عرضها - فالرقم الذي ترسله يقود إلى ما رأته.
+# أسماء لا كائنات: الاسم يبقى صالحاً لو أُعيد تحميل الإعداد وسط
+# المحادثة، والكائن المنسوخ في الجلسة يصير سعراً قديماً بلا أن يُلاحَظ.
+# لا هجرة لهذا الحقل ولا نسخة احتياطية: غيابه من جلسة قديمة يعني
+# «لا خيارات معروضة»، وهو ما تقوله None بالضبط - فيُقرأ في كل موضع
+# بصيغة `session.get("service_options") or []`.
+DEFAULT_SESSION = {
+    "state": STATE_IDLE,
+    "service": None,
+    "lead_id": None,
+    "service_options": None,
+}
 
 _lock = threading.Lock()
 

@@ -422,7 +422,8 @@ def test_today_every_intent_has_exactly_one_variant():
     for variant_id in variants.all_variant_ids():
         per_intent.setdefault(variants.intent_of(variant_id), []).append(variant_id)
     assert all(len(ids) == 1 for ids in per_intent.values())
-    assert len(per_intent) == 10
+    # 10 + نيّتا كشف الغموض (التغيير #6): ambiguity_question، ambiguity_reprompt
+    assert len(per_intent) == 12
 
 
 def test_template_hash_changes_when_the_template_changes():
