@@ -24,6 +24,15 @@ save_lead بسلوكه السابق حرفياً.
 
 شجرة القرار نفسها لم تتغيّر: نفس الفروع والشروط والردود تماماً.
 
+[التغيير #5 - مسار الإرسال الموحّد] لم يبقَ في هذا الملف نص رد واحد:
+كلها في variants.py، وكل فرع هنا يسمّي الصياغة التي اختارها بمعرّفها.
+النصوص المُصاغة مطابقة حرفاً بحرف لما كانت عليه. `_decide` تُرجع
+ReplyDecision (نص + variant_id + lead_id + rule_decision) بدل زوج،
+فيصل معرّف الصياغة والـLead إلى موضع الإرسال ويصير كل صادر منسوباً.
+
+هذا ليس اختياراً بين صياغات: لكل نية صياغة واحدة اليوم، ومنطق
+الاختيار خارج نطاق هذا التغيير (§16 - لا توليد، لا اختيار آلي).
+
 هذا هو مصدر الحقيقة الوحيد (Business Truth): القرارات، الأسعار،
 الحجوزات، الـLeads - في كل الحالات، بما فيها Phase 3B.
 
@@ -47,7 +56,8 @@ rule_decision المُرجَع دائماً يعكس القرار الذي كا�
 In-Memory فقط كما كان (لا يُحفَظ على القرص - قيمة تشخيصية مؤقتة).
 """
 
-from channel_interface import IncomingMessage
+import variants
+from channel_interface import IncomingMessage, ReplyDecision
 from services import CENTER_NAME, find_service, services_list_text
 from leads_store import (
     STATE_BOOKING_REQUESTED,
@@ -71,11 +81,6 @@ HESITANT_WORDS = [
     "أشوف", "اشوف", "أرجعلك", "ارجعلك", "أردلك", "اردلك", "يمكن",
 ]
 
-HESITANT_REPLY = (
-    "تمام 🌸 خذي وقتك براحتك، وإذا حبيتي تعرفين أي تفاصيل إضافية "
-    "أو تقررين الحجز، إحنا موجودين لخدمتج."
-)
-
 AI_OVERRIDE_ALLOWED = {"confirm_booking", "decline", "hesitant"}
 
 
@@ -89,11 +94,20 @@ def get_last_rule_decision(user_id: str) -> str:
     return _last_rule_decisions.get(user_id, "other")
 
 
-def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
+def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
     """
     منطق القرار - نفس الفروع والشروط والردود تماماً كما كانت، مع
     استبدال كل قراءة/تعديل لحالة الجلسة باستدعاء session_store
     بدل التعامل المباشر مع dict في الذاكرة.
+
+    [التغيير #5] كل فرع صار يُرجع ReplyDecision بدل زوج (نص، قرار):
+    النص نفسه حرفياً، مضافاً إليه `variant_id` الصياغة التي أنتجته
+    و`lead_id` الـLead الذي يخصّه - وهما ما يحتاجه مسار الإرسال لنسب
+    الرسالة الصادرة إلى نتيجتها. الفروع والشروط لم يتغيّر منها شيء،
+    ولا حرف من أي نص: النصوص انتقلت إلى variants.py كما هي.
+
+    `lead_id` يُقرأ من الجلسة **قبل** clear_session في الفرعين
+    اللذين يغلقانها - لولا ذلك لضاعت نسبة أهم رسالتين في المحادثة.
     """
     user_id = message.user_id
     text = message.text.strip()
@@ -107,18 +121,23 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
             # سقوط آمن: جلسة بدأت قبل هذا التغيير فلا تحمل lead_id، أو
             # صفّها اختفى من الملف. السلوك السابق حرفياً - صف جديد -
             # أفضل من ضياع الحجز.
-            save_lead(
+            lead_id = save_lead(
                 user_id=user_id,
                 service_name=service_name,
                 channel=message.channel,
                 status=STATE_BOOKING_REQUESTED,
                 contact_info=text,
             )
-        reply = (
-            f"شكراً لك 🌸 تم تسجيل حجزك لخدمة {service_name} في {CENTER_NAME}.\n"
-            f"سيتواصل معك فريقنا خلال وقت قصير لتأكيد الموعد المناسب."
+        return ReplyDecision(
+            text=variants.render(
+                "booking_request_ack.v1",
+                service_name=service_name,
+                center_name=CENTER_NAME,
+            ),
+            variant_id="booking_request_ack.v1",
+            lead_id=lead_id,
+            rule_decision="confirm_booking",
         )
-        return reply, "confirm_booking"
 
     if session["state"] == session_store.STATE_AWAITING_BOOKING_REPLY:
         lowered = text.lower()
@@ -141,7 +160,12 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
 
         if effective_branch == "confirm_booking":
             session_store.update_session(user_id, state=session_store.STATE_AWAITING_CONTACT_INFO)
-            return "ممتاز! الرجاء إرسال اسمك ورقم هاتفك في رسالة واحدة لتأكيد الحجز.", rule_branch
+            return ReplyDecision(
+                text=variants.render("ask_contact_info.v1"),
+                variant_id="ask_contact_info.v1",
+                lead_id=lead_id,
+                rule_decision=rule_branch,
+            )
 
         if effective_branch == "decline":
             session_store.clear_session(user_id)
@@ -149,9 +173,14 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
             # الحالة تصير declined، وهي داخل OPEN_STATES فيبقى الصف
             # مؤهلاً للمتابعة تماماً كما كان (D-015).
             if not (lead_id and record_decline(lead_id)):
-                save_lead(user_id=user_id, service_name=service_name,
-                          channel=message.channel, status=STATE_DECLINED)
-            return "تمام 🌸 إذا احتجتِ أي معلومة إضافية عن خدماتنا أنا موجودة.", rule_branch
+                lead_id = save_lead(user_id=user_id, service_name=service_name,
+                                    channel=message.channel, status=STATE_DECLINED)
+            return ReplyDecision(
+                text=variants.render("decline_ack.v1"),
+                variant_id="decline_ack.v1",
+                lead_id=lead_id,
+                rule_decision=rule_branch,
+            )
 
         if effective_branch == "hesitant":
             # التردد لا يحسم شيئاً - تُسجَّل الإشارة والصف يبقى كما هو،
@@ -159,9 +188,19 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
             # الجلسة تبقى مفتوحة كما كانت تماماً.
             if lead_id:
                 record_hesitation(lead_id)
-            return HESITANT_REPLY, rule_branch
+            return ReplyDecision(
+                text=variants.render("hesitant_ack.v1"),
+                variant_id="hesitant_ack.v1",
+                lead_id=lead_id,
+                rule_decision=rule_branch,
+            )
 
-        return "هل ترغبين بتأكيد حجز موعد؟ (نعم / لا)", rule_branch
+        return ReplyDecision(
+            text=variants.render("booking_reply_reprompt.v1"),
+            variant_id="booking_reply_reprompt.v1",
+            lead_id=lead_id,
+            rule_decision=rule_branch,
+        )
 
     service = find_service(text)
     if service:
@@ -179,25 +218,43 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
             service=service,
             lead_id=lead_id,
         )
-        reply = (
-            f"سعر {service['name']} في {CENTER_NAME} هو {service['price']}.\n"
-            f"هل ترغبين بحجز موعد؟"
+        return ReplyDecision(
+            text=variants.render(
+                "price_quote.v1",
+                service_name=service["name"],
+                center_name=CENTER_NAME,
+                price=service["price"],
+            ),
+            variant_id="price_quote.v1",
+            lead_id=lead_id,
+            rule_decision="price_inquiry",
         )
-        return reply, "price_inquiry"
 
-    reply = (
-        f"أهلاً بك في {CENTER_NAME} 🌸\n"
-        f"هذه خدماتنا المتوفرة حالياً:\n{services_list_text()}\n\n"
-        f"أي خدمة تودين الاستفسار عن سعرها؟"
+    # لا Lead هنا: لم يُذكر أي سعر ولم يُنشأ أي صف. lead_id=None حالة
+    # صحيحة يتعامل معها مسار الإرسال، لا نقص فيه.
+    return ReplyDecision(
+        text=variants.render(
+            "services_list.v1",
+            center_name=CENTER_NAME,
+            services_list=services_list_text(),
+        ),
+        variant_id="services_list.v1",
+        lead_id=None,
+        rule_decision="other",
     )
-    return reply, "other"
 
 
-def handle_message(message: IncomingMessage, ai_intent: str | None = None) -> str:
+def handle_message(message: IncomingMessage, ai_intent: str | None = None) -> ReplyDecision:
     """
-    واجهة مستقرة - نفس التوقيع وقيمة الإرجاع كما كانت. أي كود يعتمد
-    عليها يستمر بالعمل دون أي تغيير.
+    [التغيير #5] تُرجع ReplyDecision بدل `str`.
+
+    قيمة الإرجاع تغيّرت عن قصد: النص وحده لا يكفي مسار الإرسال الموحّد،
+    فهو يحتاج `variant_id` ليعرف أي صياغة أُرسلت و`lead_id` ليعرف
+    لِمَن. تمريرهما عبر قناة جانبية (قاموس عام كـ_last_rule_decisions)
+    كان سيخفي مُدخَلات الإرسال عن موضع الاستدعاء ويكسر عند التوازي.
+
+    `.text` هو نفس السلسلة السابقة حرفاً بحرف.
     """
-    reply_text, rule_decision = _decide(message, ai_intent)
-    _last_rule_decisions[message.user_id] = rule_decision
-    return reply_text
+    decision = _decide(message, ai_intent)
+    _last_rule_decisions[message.user_id] = decision.rule_decision
+    return decision

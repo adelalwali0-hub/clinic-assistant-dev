@@ -86,6 +86,7 @@ import uuid
 from datetime import datetime
 
 import events
+import variants  # لبصمة القالب في حدث المتابعة - وحدة أوراق بلا اعتماديات
 
 LEADS_FILE = "leads.csv"
 LOCK_FILE = LEADS_FILE + ".lock"
@@ -828,11 +829,22 @@ def get_leads_to_expire(hours_after_second_followup: float = 72) -> list[dict]:
     return candidates
 
 
-def mark_followup_sent(lead_id: str, new_stage: str) -> bool:
+def mark_followup_sent(lead_id: str, new_stage: str, variant_id: str | None = None) -> bool:
     """
     يُعلّم صف Lead واحداً بأن متابعة أُرسلت له. المخاطبة بـlead_id
     وحده: المفتاح الثلاثي السابق (عميل + خدمة + طابع زمني بدقة الثانية)
     كان قادراً على مطابقة أكثر من صف عند استفسارين في نفس الثانية.
+
+    [التغيير #5] `variant_id` يصل من مسار الإرسال الموحّد: FOLLOWUP_SENT
+    هو حدث الرسالة الصادرة لمسار المتابعة (§5)، فيحمل الصياغة التي
+    أُرسلت فعلاً كما يحمل RESPONSE_SENT صياغته. الإصدار يبقى هنا لا في
+    outbound.send لأنه يجب أن يقع تحت قفل leads.csv بعد نجاح كتابة
+    الصف: حدث متابعة بلا صف مُعلَّم يعني إعادة إرسال أبدية لا يفسّرها
+    السجل.
+
+    None مسموح ويعني "عُلِّم خارج مسار الإرسال" (استدعاء يدوي أو
+    اختبار)، ويُكتب الحدث بـvariant_id فارغ. لا مسار إنتاجي يفعل ذلك:
+    send_followups.py يمرّر المعرّف دائماً.
     """
     if not lead_id:
         return False
@@ -845,15 +857,18 @@ def mark_followup_sent(lead_id: str, new_stage: str) -> bool:
                 row["تاريخ آخر متابعة"] = datetime.now().strftime(TIMESTAMP_FORMAT)
                 _write_all_rows_unlocked(rows)
                 # send_followups.py لا يستدعي هذه الدالة إلا بعد نجاح
-                # channel.send_message، فالحدث يعني "رسالة غادرت فعلاً"
-                # لا "حاولنا". محاولة فاشلة ثم إعادة محاولة ناجحة تُنتج
-                # حدثاً واحداً بالضبط، لا حدثين ولا صفراً.
+                # الإرسال عبر outbound.send، فالحدث يعني "رسالة غادرت
+                # فعلاً" لا "حاولنا" - وهو نفس معناه منذ أول سطر كُتب
+                # به على القرص. محاولة فاشلة ثم إعادة محاولة ناجحة
+                # تُنتج حدثاً واحداً بالضبط، لا حدثين ولا صفراً.
                 events.emit(events.FOLLOWUP_SENT, lead_id=lead_id,
                             channel=row.get("القناة", ""),
+                            variant_id=variant_id,
                             payload={
                                 "user_id": row.get("معرف العميل", ""),
                                 "service_name": row.get("الخدمة المطلوبة", ""),
                                 "stage": new_stage,
+                                "variant_hash": variants.template_hash(variant_id),
                             })
                 return True
         return False

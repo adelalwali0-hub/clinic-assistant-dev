@@ -239,7 +239,7 @@ def test_price_quoted_lead_becomes_eligible_for_followup_after_window(frozen_clo
 # ------------------------------------------- 3) business_logic.handle_message (تكامل)
 
 def test_handle_message_price_inquiry_creates_lead_and_stores_id_in_session():
-    reply = handle_message(make_message("800", "كم سعر البوتوكس؟"))
+    reply = handle_message(make_message("800", "كم سعر البوتوكس؟")).text
 
     assert SERVICE_BOTOX_PRICE in reply
     rows = read_rows()
