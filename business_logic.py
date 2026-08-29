@@ -402,7 +402,15 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
         # الاسم المرسَل وحده قبل الرقم يُدمَج معه هنا، فيصل الصف كاملاً
         # (اسم + رقم) بدل رقم بلا اسم تعمل عليه العيادة يدوياً.
         text = _join_contact_parts(session.get("provisional_name"), text)
-        session_store.clear_session(user_id)
+        # [التغيير #7] الكتابة **قبل** مسح الجلسة، لا بعده.
+        #
+        # كان المسح يسبق: انقطاعُ تيار بين السطرين يترك جلسة idle بلا
+        # أي صف - الحجز يختفي كأنه لم يقع، ولا شيء لاحقاً يكشفه. الآن
+        # أسوأ ما يقع بين السطرين جلسةٌ ما زالت تنتظر بيانات التواصل
+        # بينما الصف مكتوب: العميلة تُسأل مرة أخرى، فترسل رقمها،
+        # وrecord_booking_request تُحدِّث **نفس الصف** بنفس lead_id بلا
+        # صف ثانٍ. «تُسأل مرة أخرى» خسارة محتملة؛ «اختفى الحجز» خسارة
+        # مؤكدة لا تُسترجَع.
         if not (lead_id and record_booking_request(lead_id=lead_id, contact_info=text)):
             # سقوط آمن: جلسة بدأت قبل هذا التغيير فلا تحمل lead_id، أو
             # صفّها اختفى من الملف. السلوك السابق حرفياً - صف جديد -
@@ -414,6 +422,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
                 status=STATE_BOOKING_REQUESTED,
                 contact_info=text,
             )
+        session_store.clear_session(user_id)
         return ReplyDecision(
             text=variants.render(
                 "booking_request_ack.v1",
