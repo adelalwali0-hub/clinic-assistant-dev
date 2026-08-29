@@ -24,16 +24,49 @@ threading.Lock يحميان من تلف الملف أو تعارض الكتاب�
 ولا يُعاد تسعير الخدمة على عميلة وسط محادثة. أول كتابة لاحقة على
 الملف تثبّت الاسم الجديد على القرص. تُؤخذ نسخة احتياطية مرة واحدة
 قبل أول كتابة، كما في leads.csv.
+
+[التغيير #7 - مهلة الجلسة | F9]
+لم يكن للجلسات عمر: جلسة تنتظر جواباً بلا رسالة تالية تبقى منتظرة
+**للأبد**، فتُقرأ رسالة العميلة بعد شهر جواباً على سؤال ميت، وينمو
+data/sessions.json بلا حد بحالات ميتة.
+
+الآن لكل جلسة `updated_at`، وجلسة غير `idle` تجاوز عمرها
+SESSION_TTL_HOURS تُقرأ كجلسة افتراضية (idle) - فرسالتها التالية
+تُعامَل معاملة رسالة جديدة تماماً.
+
+الانتهاء **كسول**: يقع عند القراءة، بلا كانِس ولا جدولة. لا شيء في
+هذا النظام يعمل بجدولة (D-013: المتابعات سكربتات يدوية)، وكانِسٌ لا
+يُشغَّل لا يغيّر شيئاً.
+
+الانتهاء **صامت**: لا رسالة تُرسَل. العميلة التي تعود بعد يوم تريد
+جواب سؤالها لا شرحاً عن آلة حالاتنا - فتتلقى سعراً كأنها كتبت أول
+مرة. ولهذا لا حاجة إلى صياغة جديدة لهذا المسار.
+
+جلسة قديمة بلا `updated_at` يُشتقّ عمرها من تاريخ تعديل الملف
+(mtime): حدٌّ **أعلى** لعمرها الحقيقي، فلا تنتهي جلسة أبكر مما
+تستحق. هذا هو نفس مبدأ D-016: لا تُسقَط عميلة وسط محادثة بسبب هجرة.
+
+SESSION_TTL_HOURS = 24 مساوية عمداً لـSILENCE_WINDOW_HOURS في
+leads_store: عند تلك الساعة يكون الـLead قد عُومل صامتاً ودخل دورة
+المتابعة، فجلسة تدّعي بعدها أن محادثة جارية تناقض سجل الـLeads.
+القيمة ثابت مسمّى واحد: إن نُقلت نافذة الصمت إلى 6-12 ساعة
+(PRD Q1، Gate C) تُنقل معها هنا بسطر واحد.
 """
 
 import json
 import os
 import shutil
 import threading
+from datetime import datetime
 
 DATA_DIR = "data"
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 BACKUP_FILE_STATUS_VOCABULARY = SESSIONS_FILE + ".backup-pre-status-vocabulary"
+
+# انظر الترويسة: مساوية عمداً لـleads_store.SILENCE_WINDOW_HOURS.
+# لا تُستورَد من هناك: طبقة التخزين لا تعرف طبقة الـLeads، والمساواة
+# قرار موثّق لا اعتماد برمجي.
+SESSION_TTL_HOURS = 24
 
 STATE_IDLE = "idle"
 STATE_AWAITING_BOOKING_REPLY = "awaiting_booking_reply"
@@ -62,15 +95,69 @@ _LEGACY_STATES = {"awaiting_booking_confirmation": STATE_AWAITING_BOOKING_REPLY}
 # العيادة العمل عليه. None في الجلسات الافتراضية وفي أي جلسة بدأت قبل
 # إضافة هذا الحقل، ويُقرأ في كل موضع بصيغة
 # `session.get("provisional_name")`.
+#
+# updated_at: طابع آخر كتابة على الجلسة (ISO محلي بلا منطقة زمنية -
+# نفس اصطلاح leads_store وevents). عليه وحده تقوم المهلة. None في
+# الجلسة الافتراضية وفي أي جلسة كُتبت قبل هذا الحقل، وعندها يُشتقّ
+# العمر من mtime الملف - انظر الترويسة.
 DEFAULT_SESSION = {
     "state": STATE_IDLE,
     "service": None,
     "lead_id": None,
     "service_options": None,
     "provisional_name": None,
+    "updated_at": None,
 }
 
 _lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="microseconds")
+
+
+def _sessions_file_mtime() -> datetime | None:
+    """
+    تاريخ آخر تعديل للملف - عمرٌ بديل للجلسات التي لا تحمل طابعاً.
+    None إن لم يوجد الملف: لا ملف يعني لا جلسات مخزَّنة أصلاً.
+    """
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(SESSIONS_FILE))
+    except OSError:
+        return None
+
+
+def _age_hours(session: dict, fallback: datetime | None) -> float | None:
+    """
+    عمر الجلسة بالساعات، أو None حين يتعذّر تحديده إطلاقاً.
+
+    None تعني «لا أعرف»، وكل مُستدعٍ أدناه يعامل «لا أعرف» على أنها
+    **غير منتهية**: إسقاط جلسة لا نعرف عمرها يقطع محادثة حيّة على
+    شكّ، وهو أسوأ من إبقاء جلسة ميتة تحرسها القاعدة الجديدة أصلاً.
+    """
+    stamp = session.get("updated_at")
+    written_at = None
+    if stamp:
+        try:
+            written_at = datetime.fromisoformat(stamp)
+        except (TypeError, ValueError):
+            written_at = None
+    if written_at is None:
+        written_at = fallback
+    if written_at is None:
+        return None
+    return (datetime.now() - written_at).total_seconds() / 3600
+
+
+def _is_expired(session: dict, fallback: datetime | None) -> bool:
+    """
+    جلسة idle لا تنتهي: هي أصلاً الحالة التي ينتهي إليها كل شيء، ولا
+    فرق بين قراءتها وقراءة الافتراضية.
+    """
+    if session.get("state", STATE_IDLE) == STATE_IDLE:
+        return False
+    age = _age_hours(session, fallback)
+    return age is not None and age > SESSION_TTL_HOURS
 
 
 def _migrate_states(sessions: dict) -> dict:
@@ -114,6 +201,24 @@ def _backup_once() -> None:
         print(f"[session_store] تحذير: تعذّر إنشاء النسخة الاحتياطية {BACKUP_FILE_STATUS_VOCABULARY}: {e}")
 
 
+def _prune_expired(sessions: dict, keep_user_id: str) -> dict:
+    """
+    يُسقط الجلسات المنتهية قبل الكتابة، فلا ينمو الملف بحالات ميتة.
+
+    إسقاطها لا يغيّر أي سلوك: get_session تقرأها افتراضية أصلاً، وصفٌّ
+    محذوف يُقرأ افتراضياً كذلك. `keep_user_id` استثناء واحد - الجلسة
+    التي تُكتب الآن - حتى لا تسقط كتابة جارية بعمرها القديم.
+    """
+    fallback = _sessions_file_mtime()
+    return {
+        user_id: session
+        for user_id, session in sessions.items()
+        if user_id == keep_user_id
+        or not isinstance(session, dict)
+        or not _is_expired(session, fallback)
+    }
+
+
 def _write_all_sessions(sessions: dict) -> None:
     _backup_once()
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -129,10 +234,17 @@ def get_session(user_id: str) -> dict:
     الافتراضية (idle، لا خدمة) إن لم توجد جلسة سابقة. التعديل على
     القاموس المُرجَع لا يُحفَظ تلقائياً - استخدم update_session أو
     clear_session للحفظ الفعلي.
+
+    [التغيير #7] جلسة تجاوزت SESSION_TTL_HOURS تُرجَع افتراضية: هنا
+    يقع الانتهاء، كسولاً وصامتاً. القراءة لا تكتب شيئاً - الملف يبقى
+    كما هو حتى أول كتابة لاحقة، وهي التي تُسقط المنتهية فعلياً.
     """
     with _lock:
         sessions = _read_all_sessions()
-    session = sessions.get(user_id, DEFAULT_SESSION)
+        fallback = _sessions_file_mtime()
+    session = sessions.get(user_id)
+    if session is None or _is_expired(session, fallback):
+        return dict(DEFAULT_SESSION)
     return dict(session)
 
 
@@ -141,11 +253,21 @@ def update_session(user_id: str, **changes) -> dict:
     مسار الكتابة لتعديل حقول محددة في جلسة العميلة. يدمج changes مع
     الحالة الحالية، يحفظ فوراً (Atomic + Lock)، ويرجع الحالة الكاملة
     بعد التحديث.
+
+    [التغيير #7] الدمج يقع على الحالة **الحيّة**: جلسة منتهية تُعامَل
+    افتراضية هنا كما تُعامَل في القراءة، وإلا لأحيا تحديثٌ جزئي جلسةً
+    ميتة بحقولها القديمة.
     """
     with _lock:
         sessions = _read_all_sessions()
-        current = dict(sessions.get(user_id, DEFAULT_SESSION))
+        fallback = _sessions_file_mtime()
+        stored = sessions.get(user_id)
+        if stored is None or _is_expired(stored, fallback):
+            stored = DEFAULT_SESSION
+        current = dict(stored)
         current.update(changes)
+        current["updated_at"] = _now_iso()
+        sessions = _prune_expired(sessions, keep_user_id=user_id)
         sessions[user_id] = current
         _write_all_sessions(sessions)
         return dict(current)
@@ -155,6 +277,7 @@ def clear_session(user_id: str) -> dict:
     """يعيد جلسة العميلة لحالتها الافتراضية (idle، لا خدمة) ويحفظها."""
     with _lock:
         sessions = _read_all_sessions()
-        sessions[user_id] = dict(DEFAULT_SESSION)
+        sessions = _prune_expired(sessions, keep_user_id=user_id)
+        sessions[user_id] = dict(DEFAULT_SESSION, updated_at=_now_iso())
         _write_all_sessions(sessions)
         return dict(sessions[user_id])
