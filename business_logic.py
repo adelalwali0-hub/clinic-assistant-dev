@@ -105,6 +105,9 @@ from storage import session_store
 # آخر قرار Rule-Based (بمعزل عن AI) لكل مستخدم - In-Memory فقط، لا يُحفَظ
 _last_rule_decisions: dict[str, str] = {}
 
+# تُطابَق بحدود الكلمة (matching.py) لا بالسلسلة الفرعية. القوائم نفسها
+# لم يُحذف منها ولا يُضف إليها شيء - ما تغيّر هو أن «لا» صارت تعني
+# الكلمة «لا» لا أي كلمة تحتويها.
 CONFIRM_WORDS = ["نعم", "اكيد", "أكيد", "ايوة", "إيوه", "يس", "yes", "موافق", "اوك", "أوك", "ok"]
 DECLINE_WORDS = ["لا", "لأ", "مو حاليا", "مو الحين", "no"]
 
@@ -353,15 +356,17 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> ReplyDecision:
         )
 
     if session["state"] == session_store.STATE_AWAITING_BOOKING_REPLY:
-        lowered = text.lower()
         service_name = session["service"]["name"]
         lead_id = session.get("lead_id")
 
-        if any(word in lowered for word in CONFIRM_WORDS):
+        # المطابقة بحدود الكلمة لا بالسلسلة الفرعية: `"لا" in "يلا"`
+        # كانت صحيحة، فرسالة ودودة تُقرأ رفضاً ويُغلَق ملف العميلة على
+        # رفض لم يقع. الترتيب والفروع والردود لم يتغيّر منها شيء.
+        if matching.matches_any(text, CONFIRM_WORDS):
             rule_branch = "confirm_booking"
-        elif any(word in lowered for word in DECLINE_WORDS):
+        elif matching.matches_any(text, DECLINE_WORDS):
             rule_branch = "decline"
-        elif any(word in lowered for word in HESITANT_WORDS):
+        elif matching.matches_any(text, HESITANT_WORDS):
             rule_branch = "hesitant"
         else:
             rule_branch = "other"
