@@ -55,16 +55,16 @@ def run_first_followups(channel: TelegramChannel) -> None:
 
     print(f"Follow-up 1: {len(eligible)} استفسار مؤهل.")
     for row in eligible:
+        lead_id = row["lead_id"]
         user_id = row["معرف العميل"]
         service_name = row["الخدمة المطلوبة"]
-        timestamp = row["التاريخ والوقت"]
         price = row.get("سعر الخدمة وقت الإنشاء", "")
 
         message_text = build_followup_1_message(service_name, price)
         success = channel.send_message(OutgoingMessage(user_id=user_id, text=message_text))
 
         if success:
-            mark_followup_sent(user_id=user_id, service_name=service_name, timestamp=timestamp, new_stage="1")
+            mark_followup_sent(lead_id=lead_id, new_stage="1")
             print(f"[SENT-1] -> {user_id} | {service_name}")
         else:
             print(f"[FAILED-1] -> {user_id} | {service_name} | لن يُعلَّم، سيُعاد المحاولة لاحقاً")
@@ -78,15 +78,15 @@ def run_second_followups(channel: TelegramChannel) -> None:
 
     print(f"Follow-up 2: {len(eligible)} استفسار مؤهل.")
     for row in eligible:
+        lead_id = row["lead_id"]
         user_id = row["معرف العميل"]
         service_name = row["الخدمة المطلوبة"]
-        timestamp = row["التاريخ والوقت"]
 
         message_text = build_followup_2_message(service_name)
         success = channel.send_message(OutgoingMessage(user_id=user_id, text=message_text))
 
         if success:
-            mark_followup_sent(user_id=user_id, service_name=service_name, timestamp=timestamp, new_stage="2")
+            mark_followup_sent(lead_id=lead_id, new_stage="2")
             print(f"[SENT-2] -> {user_id} | {service_name}")
         else:
             print(f"[FAILED-2] -> {user_id} | {service_name} | لن يُعلَّم، سيُعاد المحاولة لاحقاً")
@@ -100,7 +100,7 @@ def run_expire_pass() -> None:
 
     print(f"Expiry: {len(candidates)} استفسار سيُعلَّم كـ'منتهي'.")
     for row in candidates:
-        mark_expired(user_id=row["معرف العميل"], service_name=row["الخدمة المطلوبة"], timestamp=row["التاريخ والوقت"])
+        mark_expired(lead_id=row["lead_id"])
         print(f"[EXPIRED] -> {row['معرف العميل']} | {row['الخدمة المطلوبة']}")
 
 

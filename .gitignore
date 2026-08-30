@@ -15,6 +15,7 @@ env/
 
 # Sensitive data
 leads.csv
+leads.csv.*
 
 # Local files
 *.log
