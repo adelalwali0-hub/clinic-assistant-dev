@@ -22,9 +22,26 @@
 و"معرف العميل" معاً. لا Identity Resolution: نفس المعرّف على قناتين
 مختلفتين عميلان مختلفان.
 
+[إنشاء الـLead لحظة عرض السعر - PRD D1]
+`record_price_quote()` هي مسار الإنشاء الحقيقي: تُستدعى لحظة الرد
+بالسعر، لا عند تسليم البيانات. الصمت حالة مشروعة - الصف يُكتب فوراً
+بـ`الحالة = not_ready` و`status_reason = price_quoted`، فيصير مؤهلاً
+لدورة المتابعة تلقائياً بعد نافذة الصمت (شرط الـ24 ساعة في
+get_leads_eligible_for_first_followup هو نفسه نافذة الصمت في PRD §8).
+لا قيمة جديدة في عمود "الحالة": مواءمة المفردات مع §8 عمل منفصل.
+
+الردود اللاحقة تُحدِّث نفس الصف عبر lead_id ولا تُنشئ صفاً ثانياً:
+  record_booking_request()  - وافقت وسلّمت بياناتها
+  record_status_reason()    - رفضت صراحة أو ترددت
+
+`save_lead()` تبقى كما هي حرفياً: تُلحق صفاً دون شرط. المنع من
+التكرار يعيش في record_price_quote وحدها - وهذا مقصود، فاستفساران
+في نفس الثانية عبر save_lead يبقيان Leadين منفصلين (PRD §6).
+
 [النسخة الاحتياطية] قبل أول كتابة على leads.csv يُنسَخ الملف كما هو
-إلى BACKUP_FILE مرة واحدة فقط، فيبقى لديك دائماً الحالة السابقة
-لإضافة lead_id سليمة على القرص.
+إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE، مرة واحدة فقط لكل اسم،
+فيبقى لديك دائماً لقطة سليمة على القرص لكل تغيير يمسّ دلالة الصفوف
+لا شكلها فقط.
 
 [حماية التزامن] كل عملية تُعدِّل الملف (save_lead, mark_followup_sent,
 mark_expired, الهجرة التلقائية) تُنفَّذ بالكامل (قراءة+تعديل+كتابة)
@@ -52,10 +69,20 @@ from datetime import datetime
 LEADS_FILE = "leads.csv"
 LOCK_FILE = LEADS_FILE + ".lock"
 BACKUP_FILE = LEADS_FILE + ".backup-pre-lead-id"
+BACKUP_FILE_PRICE_QUOTE = LEADS_FILE + ".backup-pre-price-quote-lead"
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 LEAD_ID_COLUMN = "lead_id"
 LEAD_ID_PREFIX = "ld_"
+
+# حقل تقني بقيم إنجليزية - كما lead_id تماماً. يسجّل *لماذا* الصف
+# على حالته الحالية، دون المساس بمفردات عمود "الحالة" نفسه. هذه
+# القيم هي التي ستُحمَل لاحقاً في events.jsonl كما هي.
+STATUS_REASON_COLUMN = "status_reason"
+REASON_PRICE_QUOTED = "price_quoted"
+REASON_DECLINED = "declined"
+REASON_HESITANT = "hesitant"
+REASON_BOOKING_REQUESTED = "booking_requested"
 
 FIELDNAMES = [
     LEAD_ID_COLUMN,
@@ -64,6 +91,7 @@ FIELDNAMES = [
     "القناة",
     "الخدمة المطلوبة",
     "الحالة",
+    STATUS_REASON_COLUMN,
     "بيانات التواصل",
     "سعر الخدمة وقت الإنشاء",
     "مرحلة المتابعة",
@@ -194,24 +222,33 @@ def _read_all_rows_unlocked() -> list[dict]:
 
 def _backup_once_unlocked() -> None:
     """
-    نسخة احتياطية تُنشأ مرة واحدة فقط، قبل أول كتابة على leads.csv.
+    نسخ احتياطية تُنشأ مرة واحدة فقط لكل اسم، قبل أول كتابة على
+    leads.csv بعد التغيير الذي يحمل ذلك الاسم.
 
-    الشرط "مرة واحدة" مقصود: أول كتابة تحدث بعد هذا التغيير هي كتابة
-    الهجرة، فيلتقط الملف حالة ما قبل lead_id بالضبط. لو أُعيد النسخ
-    عند كل كتابة لاحقة لضاعت تلك الحالة فوراً وصار الاسم كذباً.
+    الشرط "مرة واحدة" مقصود: أول كتابة تحدث بعد تغيير ما هي كتابة
+    هجرته، فيلتقط الملف الحالة السابقة له بالضبط. لو أُعيد النسخ عند
+    كل كتابة لاحقة لضاعت تلك الحالة فوراً وصار الاسم كذباً.
+
+    ولهذا السبب نفسه لكل تغيير اسمه: BACKUP_FILE موجود بالفعل من
+    تغيير lead_id، فلو اكتفينا به لما التُقطت لقطة ما قبل إضافة
+    status_reason إطلاقاً.
 
     لا يُنسَخ شيء إذا لم يكن هناك ملف أصلاً (تشغيل نظيف)، وفشل النسخ
     لا يُوقف الكتابة - يُطبع تحذير فقط، فالبيانات الحية أهم.
     """
     if not os.path.isfile(LEADS_FILE):
         return
-    if os.path.exists(BACKUP_FILE):
-        return
-    try:
-        shutil.copy2(LEADS_FILE, BACKUP_FILE)
-        print(f"[leads_store] نسخة احتياطية لما قبل lead_id -> {BACKUP_FILE}")
-    except OSError as e:
-        print(f"[leads_store] تحذير: تعذّر إنشاء النسخة الاحتياطية {BACKUP_FILE}: {e}")
+    for backup_path, label in (
+        (BACKUP_FILE, "lead_id"),
+        (BACKUP_FILE_PRICE_QUOTE, "إنشاء الـLead لحظة عرض السعر"),
+    ):
+        if os.path.exists(backup_path):
+            continue
+        try:
+            shutil.copy2(LEADS_FILE, backup_path)
+            print(f"[leads_store] نسخة احتياطية لما قبل {label} -> {backup_path}")
+        except OSError as e:
+            print(f"[leads_store] تحذير: تعذّر إنشاء النسخة الاحتياطية {backup_path}: {e}")
 
 
 def _write_all_rows_unlocked(rows: list[dict]) -> None:
@@ -240,9 +277,13 @@ def _migrate_file_if_needed_locked() -> None:
     """
     هجرة حافِظة للحقول من أي بنية سابقة إلى البنية الحالية:
 
-      V1 (7 أعمدة، فيها "تمت المتابعة") -> V3
-      V2 (10 أعمدة، بلا lead_id)        -> V3، بلا فقد أي حقل
-      V3                                 -> خروج فوري، بلا أي كتابة
+      V1 (7 أعمدة، فيها "تمت المتابعة") -> الحالية
+      V2 (10 أعمدة، بلا lead_id)        -> الحالية، بلا فقد أي حقل
+      V3 (11 عموداً، بلا status_reason) -> الحالية، بلا فقد أي حقل
+      الحالية                            -> خروج فوري، بلا أي كتابة
+
+    الأعمدة المستجدة تُملأ "" لكل صف قائم: صف كُتب قبل هذا التغيير
+    لا يُعرَف سبب حالته، و"" تقول ذلك بصدق بدل تخمينه.
 
     كل حقل يُنقَل كما هو عبر row.get(field). النسخة السابقة من هذه
     الدالة كانت تصفّر السعر ومرحلة المتابعة وتاريخها ونتيجتها لأنها
@@ -295,7 +336,18 @@ def _read_all_rows() -> list[dict]:
 
 def save_lead(user_id: str, service_name: str, channel: str, status: str, contact_info: str = "") -> str:
     """
-    يكتب صف Lead جديداً ويُرجع lead_id المستقر الخاص به.
+    يكتب صف Lead جديداً - دون شرط - ويُرجع lead_id المستقر الخاص به.
+
+    لم تعد مسار الإنشاء الأساسي: `record_price_quote()` هي التي تُنشئ
+    الـLead لحظة عرض السعر (PRD D1). تبقى هذه الدالة كما هي حرفياً
+    لمسارين: السقوط الآمن في business_logic.py حين لا تحمل الجلسة
+    lead_id (جلسة بدأت قبل هذا التغيير)، وأي استدعاء خارجي قائم.
+
+    لا منع تكرار هنا بقصد: استفساران متتاليان عبر هذه الدالة يبقيان
+    صفّين منفصلين. المنع من التكرار يعيش في record_price_quote وحدها.
+
+    status_reason يُترك "" - صف كتبته هذه الدالة لا يحمل سبباً مسجّلاً،
+    وهذا أصدق من تخمين سبب من قيمة `status`.
 
     القيمة المُرجَعة إضافة متوافقة رجعياً (كانت None): مواقع الاستدعاء
     الحالية في business_logic.py تتجاهلها دون أي تغيير، وهي المَعبر
@@ -324,6 +376,7 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
             "القناة": channel,
             "الخدمة المطلوبة": service_name,
             "الحالة": status,
+            STATUS_REASON_COLUMN: "",
             "بيانات التواصل": contact_info,
             "سعر الخدمة وقت الإنشاء": _lookup_current_price(service_name),
             "مرحلة المتابعة": "0",
@@ -335,7 +388,136 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
         return lead_id
 
 
+def _is_open_lead(row: dict) -> bool:
+    """
+    Lead "مفتوح" = نيّة تجارية لم تُحسم بعد: لا نتيجة متابعة (لا
+    مسترجَع ولا أُغلق ولا منتهي) ولم يُطلب حجزها.
+
+    Lead محسوم لا يُعاد استخدامه: عميلة حجزت ثم عادت تسأل عن نفس
+    الخدمة بعد شهر نيّة تجارية جديدة، لا استكمال للأولى (PRD §6).
+    """
+    return row.get("نتيجة المتابعة", "") == "" and row.get("الحالة") != "confirmed"
+
+
+def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
+    """
+    ينشئ الـLead لحظة الرد بالسعر (PRD D1) ويُرجع lead_id المستقر.
+
+    هذه هي اللحظة التي يصبح فيها الـLead مؤهلاً (Qualified Lead في
+    PRD §8): وصل PRICE_QUOTED. الصمت بعدها حالة مشروعة - الصف موجود
+    ويدخل دورة المتابعة وحده بعد نافذة الصمت، بلا أي فعل من العميلة.
+
+    الحالة المكتوبة `not_ready` بلا قيمة جديدة في عمود "الحالة":
+    شرط الـ24 ساعة في get_leads_eligible_for_first_followup هو نفسه
+    نافذة الصمت، فالصف الجديد (مرحلة 0، بلا نتيجة) يصير مؤهلاً بعد
+    24 ساعة صمت بالضبط، ويخرج من الأهلية فور تحديثه إن ردّت قبلها.
+    السبب الحقيقي مسجَّل في status_reason = price_quoted.
+
+    idempotent لكل نيّة تجارية مفتوحة: إن كان للعميلة نفسها Lead
+    مفتوح لنفس الخدمة على نفس القناة، يُرجَع معرّفه بلا كتابة - نفس
+    العميلة تسأل عن نفس الخدمة مرتين لا تُنتج صفين. لا يُحدَّث الطابع
+    الزمني عند إعادة الاستخدام: تحديثه يدفع ساعة المتابعة للأمام كلما
+    سألت، فلا يُتابَع الـLead أبداً.
+
+    البحث من الأحدث للأقدم: الصف الأحدث هو النيّة الجارية فعلاً.
+    """
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+
+        for row in reversed(rows):
+            existing_id = (row.get(LEAD_ID_COLUMN) or "").strip()
+            if (
+                existing_id
+                and _same_identity(row, channel, user_id)
+                and row.get("الخدمة المطلوبة") == service_name
+                and _is_open_lead(row)
+            ):
+                return existing_id
+
+        lead_id = _new_lead_id()
+        rows.append({
+            LEAD_ID_COLUMN: lead_id,
+            "التاريخ والوقت": datetime.now().strftime(TIMESTAMP_FORMAT),
+            "معرف العميل": user_id,
+            "القناة": channel,
+            "الخدمة المطلوبة": service_name,
+            "الحالة": "not_ready",
+            STATUS_REASON_COLUMN: REASON_PRICE_QUOTED,
+            "بيانات التواصل": "",
+            # لقطة السعر لحظة *عرضه* على العميلة فعلاً، لا لحظة كتابة
+            # صف بعدها بيوم - وهو ما يفترضه اسم العمود أصلاً.
+            "سعر الخدمة وقت الإنشاء": _lookup_current_price(service_name),
+            "مرحلة المتابعة": "0",
+            "تاريخ آخر متابعة": "",
+            "نتيجة المتابعة": "",
+        })
+        _write_all_rows_unlocked(rows)
+        return lead_id
+
+
+def record_booking_request(lead_id: str, contact_info: str) -> bool:
+    """
+    العميلة وافقت وسلّمت بياناتها: يُحدَّث **نفس صف** عرض السعر عبر
+    lead_id، فلا يُنتج مسار "نعم ثم بيانات" صفين.
+
+    نتيجة المتابعة تُحسب بنفس قاعدة save_lead حرفياً: "مسترجَع" إن
+    سبقتها متابعة (مرحلة 1 أو 2)، وإلا "أُغلق" - فلا يتغير أي رقم
+    تُخرجه compute_recovery_metrics عمّا كان يُخرجه المساران السابقان
+    (صف not_ready مُعلَّم + صف confirmed جديد).
+
+    نتيجة متابعة محسومة مسبقاً لا تُدهَس: Lead بلغ "منتهي" ثم حجز
+    يُسجَّل حجزه ولا يُحتسب استرجاعاً - نفس تحفّظ save_lead، ولا يُضخَّم
+    رقم الاسترجاع.
+    """
+    if not lead_id:
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if row.get(LEAD_ID_COLUMN) == lead_id:
+                if row.get("نتيجة المتابعة", "") == "":
+                    stage = row.get("مرحلة المتابعة", "0")
+                    row["نتيجة المتابعة"] = "مسترجَع" if stage in ("1", "2") else "أُغلق"
+                row["الحالة"] = "confirmed"
+                row[STATUS_REASON_COLUMN] = REASON_BOOKING_REQUESTED
+                row["بيانات التواصل"] = contact_info
+                _write_all_rows_unlocked(rows)
+                return True
+        return False
+
+
+def record_status_reason(lead_id: str, reason: str) -> bool:
+    """
+    يسجّل *سبب* حالة الـLead دون المساس بحالته: رفضت صراحة، أو ترددت.
+
+    عمود "الحالة" ومرحلة المتابعة ونتيجتها لا تتغير، فيبقى الصف مؤهلاً
+    للمتابعة كما هو. هذا سلوك مقصود ومُسجَّل (D-015): الرافضة صراحةً
+    ما زالت تتلقى متابعات آلية اليوم، تماماً كما كانت قبل هذا التغيير
+    حين كان الرفض يُنشئ صف not_ready جديداً. كتم المتابعة عنها قرار
+    سياسة مؤجَّل للتغيير رقم 3، ويمسّ S7.
+    """
+    if not lead_id:
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if row.get(LEAD_ID_COLUMN) == lead_id:
+                row[STATUS_REASON_COLUMN] = reason
+                _write_all_rows_unlocked(rows)
+                return True
+        return False
+
+
 def get_leads_eligible_for_first_followup(hours_threshold: float = 24) -> list[dict]:
+    """
+    الشروط لم تتغير بحرف واحد. الذي تغيّر هو *من* يستوفيها: منذ
+    record_price_quote صار الـLead الصامت يُكتب لحظة عرض السعر، فيمرّ
+    من هنا وحده بعد hours_threshold من الصمت. هذا العتبة الزمنية هي
+    "نافذة الصمت" في PRD §8 - لا حاجة لتمثيلها بحالة منفصلة.
+    """
     eligible = []
     now = datetime.now()
     for row in _read_all_rows():

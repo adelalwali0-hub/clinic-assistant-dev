@@ -22,7 +22,10 @@ import threading
 DATA_DIR = "data"
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 
-DEFAULT_SESSION = {"state": "idle", "service": None}
+# lead_id: معرّف صف الـLead الذي أُنشئ لحظة عرض السعر. تحمله الجلسة
+# ليُحدَّث نفس الصف عند كل رد لاحق. None في الجلسات الافتراضية وفي أي
+# جلسة بدأت قبل إضافة هذا الحقل - وهي حالة يتعامل معها business_logic.
+DEFAULT_SESSION = {"state": "idle", "service": None, "lead_id": None}
 
 _lock = threading.Lock()
 

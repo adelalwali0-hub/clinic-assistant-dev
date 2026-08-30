@@ -5,6 +5,18 @@
 "نعم": يُطلب الاسم ورقم الهاتف -> يُسجَّل الحجز. عند "لا": يُسجَّل
 الاستفسار كـ not_ready. عند تردد واضح: رد مخصص دون حسم.
 
+[PRD D1] سجل الـLead يُنشأ **لحظة الرد بالسعر**، لا عند تسليم بيانات
+التواصل. العميلة التي تسأل عن سعر ثم تصمت لم تكن تترك أي أثر في
+leads.csv ولا تدخل دورة المتابعة إطلاقاً - وهي الأغلبية الساحقة.
+الآن يُكتب صفها فور عرض السعر ويصير مؤهلاً للمتابعة بعد نافذة الصمت.
+
+lead_id المُرجَع يُحفَظ في الجلسة، فكل رد لاحق (موافقة، رفض، تردد)
+يُحدِّث **نفس الصف** عبره ولا يُنشئ صفاً ثانياً. حين لا تحمل الجلسة
+lead_id - جلسة بدأت قبل هذا التغيير - يسقط المسار بأمان إلى
+save_lead بسلوكه السابق حرفياً.
+
+شجرة القرار نفسها لم تتغيّر: نفس الفروع والشروط والردود تماماً.
+
 هذا هو مصدر الحقيقة الوحيد (Business Truth): القرارات، الأسعار،
 الحجوزات، الـLeads - في كل الحالات، بما فيها Phase 3B.
 
@@ -30,7 +42,14 @@ In-Memory فقط كما كان (لا يُحفَظ على القرص - قيمة �
 
 from channel_interface import IncomingMessage
 from services import CENTER_NAME, find_service, services_list_text
-from leads_store import save_lead
+from leads_store import (
+    REASON_DECLINED,
+    REASON_HESITANT,
+    record_booking_request,
+    record_price_quote,
+    record_status_reason,
+    save_lead,
+)
 from storage import session_store
 
 # آخر قرار Rule-Based (بمعزل عن AI) لكل مستخدم - In-Memory فقط، لا يُحفَظ
@@ -74,14 +93,19 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
 
     if session["state"] == "awaiting_contact_info":
         service_name = session["service"]["name"]
+        lead_id = session.get("lead_id")
         session_store.clear_session(user_id)
-        save_lead(
-            user_id=user_id,
-            service_name=service_name,
-            channel=message.channel,
-            status="confirmed",
-            contact_info=text,
-        )
+        if not (lead_id and record_booking_request(lead_id=lead_id, contact_info=text)):
+            # سقوط آمن: جلسة بدأت قبل هذا التغيير فلا تحمل lead_id، أو
+            # صفّها اختفى من الملف. السلوك السابق حرفياً - صف جديد -
+            # أفضل من ضياع الحجز.
+            save_lead(
+                user_id=user_id,
+                service_name=service_name,
+                channel=message.channel,
+                status="confirmed",
+                contact_info=text,
+            )
         reply = (
             f"شكراً لك 🌸 تم تسجيل حجزك لخدمة {service_name} في {CENTER_NAME}.\n"
             f"سيتواصل معك فريقنا خلال وقت قصير لتأكيد الموعد المناسب."
@@ -91,6 +115,7 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
     if session["state"] == "awaiting_booking_confirmation":
         lowered = text.lower()
         service_name = session["service"]["name"]
+        lead_id = session.get("lead_id")
 
         if any(word in lowered for word in CONFIRM_WORDS):
             rule_branch = "confirm_booking"
@@ -112,17 +137,37 @@ def _decide(message: IncomingMessage, ai_intent: str | None) -> tuple[str, str]:
 
         if effective_branch == "decline":
             session_store.clear_session(user_id)
-            save_lead(user_id=user_id, service_name=service_name, channel=message.channel, status="not_ready")
+            # الرفض يُحدِّث صف عرض السعر القائم، لا يُنشئ صفاً ثانياً.
+            # الحالة تبقى not_ready والصف يبقى مؤهلاً للمتابعة (D-015).
+            if not (lead_id and record_status_reason(lead_id, REASON_DECLINED)):
+                save_lead(user_id=user_id, service_name=service_name, channel=message.channel, status="not_ready")
             return "تمام 🌸 إذا احتجتِ أي معلومة إضافية عن خدماتنا أنا موجودة.", rule_branch
 
         if effective_branch == "hesitant":
+            # التردد لا يحسم شيئاً - يُسجَّل السبب والصف يبقى كما هو،
+            # مؤهلاً للمتابعة. الجلسة تبقى مفتوحة كما كانت تماماً.
+            if lead_id:
+                record_status_reason(lead_id, REASON_HESITANT)
             return HESITANT_REPLY, rule_branch
 
         return "هل ترغبين بتأكيد حجز موعد؟ (نعم / لا)", rule_branch
 
     service = find_service(text)
     if service:
-        session_store.update_session(user_id, state="awaiting_booking_confirmation", service=service)
+        # PRD D1: الـLead يُنشأ هنا - لحظة الرد بالسعر - لا عند تسليم
+        # البيانات. العميلة التي تسأل ثم تصمت تترك أثراً وتدخل دورة
+        # المتابعة. lead_id يُحفظ في الجلسة ليُحدَّث نفس الصف لاحقاً.
+        lead_id = record_price_quote(
+            user_id=user_id,
+            service_name=service["name"],
+            channel=message.channel,
+        )
+        session_store.update_session(
+            user_id,
+            state="awaiting_booking_confirmation",
+            service=service,
+            lead_id=lead_id,
+        )
         reply = (
             f"سعر {service['name']} في {CENTER_NAME} هو {service['price']}.\n"
             f"هل ترغبين بحجز موعد؟"
