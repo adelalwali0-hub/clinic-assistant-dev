@@ -14,6 +14,9 @@
 وفوقها الاختبار الحاسم (الطبقة 6): أرقام القمع المشتقة من
 events.jsonl **وحده** تطابق compute_funnel_metrics() من leads.csv
 لنفس السيناريو. هذه هي أدلة Gate A نفسها، اختباراً لا ادّعاءً.
+
+الاشتقاق نفسه يعيش في events_funnel.py - وحدة شحن لا دالة اختبار.
+كان هنا سابقاً، فكان الدليل يثبت تكافؤ نسخة لا يشغّلها أحد.
 """
 
 import json
@@ -22,9 +25,12 @@ from datetime import datetime, timedelta
 import pytest
 
 import events
+import events_funnel
+import lead_recovery_report
 import leads_store
 from business_logic import handle_message
 from channel_interface import IncomingMessage
+from events_funnel import funnel_from_events
 from leads_store import (
     OUTCOME_EXPIRED,
     OUTCOME_RECOVERED,
@@ -354,82 +360,6 @@ def test_corrupt_line_does_not_sink_the_whole_log(isolated_events_file):
 
 # ---------------------------------- 6) القمع من الأحداث وحدها == من leads.csv
 
-def funnel_from_events(evts: list[dict], now: datetime,
-                       hours_threshold: float = SILENCE_WINDOW_HOURS) -> dict:
-    """
-    يشتق مؤشرات §8 من events.jsonl **وحده** - لا يقرأ leads.csv ولا
-    يستورد أي دالة حساب منه. هذا هو تقرير القمع الذي يطلبه دليل
-    Gate A، مصغَّراً إلى ما يكفي لإثبات التكافؤ.
-
-    القواعد، وكلٌّ منها ترجمة مباشرة لتعريف §8:
-      - Qualified Lead = LEAD_CREATED (لكل lead_id مرة واحدة).
-      - الحالة الجارية = آخر حدث حامل لحالة في ترتيب الإلحاق.
-        FOLLOWUP_SENT وLEAD_EXPIRED لا يغيّران الحالة - وهذا مطابق
-        لـleads.csv حيث لا يلمسان عمود "الحالة".
-      - Unbooked = حالته price_quoted ومضت نافذة الصمت على إنشائه.
-        لا حدث MARKED_UNBOOKED: التعريف زمني ويُحسب عند القراءة.
-      - Recovered = FOLLOWUP_SENT قبل BOOKING_REQUESTED، وبلا
-        LEAD_EXPIRED قبله (نتيجة محسومة لا تُدهَس - نفس تحفّظ
-        record_booking_request). بلا LEAD_EXPIRED كان هذا الشرط
-        الأخير غير قابل للتعبير من الأحداث إطلاقاً.
-      - الطبقات التي لا مصدر لها تبقى None، لا صفراً.
-    """
-    created_at: dict[str, datetime] = {}
-    price_of: dict[str, str] = {}
-    state_of: dict[str, str] = {}
-    followed_up: set[str] = set()
-    expired: set[str] = set()
-    requested: list[str] = []
-    recovered: list[str] = []
-
-    state_events = {
-        events.PRICE_QUOTED: "price_quoted",
-        events.DECLINED: "declined",
-        events.BOOKING_REQUESTED: "booking_requested",
-    }
-
-    for e in evts:  # ترتيب الإلحاق هو ترتيب الوقوع
-        lead_id, etype, payload = e["lead_id"], e["event_type"], e["payload"]
-
-        if etype == events.LEAD_CREATED:
-            created_at[lead_id] = datetime.fromisoformat(e["timestamp"])
-            price_of[lead_id] = payload.get("price", "")
-        elif etype == events.FOLLOWUP_SENT:
-            followed_up.add(lead_id)
-        elif etype == events.LEAD_EXPIRED:
-            expired.add(lead_id)
-
-        if etype in state_events:
-            state_of[lead_id] = state_events[etype]
-
-        if etype == events.BOOKING_REQUESTED:
-            requested.append(lead_id)
-            if lead_id in followed_up and lead_id not in expired:
-                recovered.append(lead_id)
-
-    def total(lead_ids) -> int:
-        return sum(leads_store._parse_price_to_number(price_of.get(i, "")) for i in lead_ids)
-
-    unbooked = [
-        lead_id for lead_id in created_at
-        if state_of.get(lead_id) == "price_quoted"
-        and (now - created_at[lead_id]).total_seconds() / 3600 >= hours_threshold
-    ]
-
-    return {
-        "qualified_leads": len(created_at),
-        "unbooked_leads": len(unbooked),
-        "booking_requests": len(requested),
-        "recovered_leads": len(recovered),
-        "recovered_completed_bookings": None,
-        "potential_revenue": total(created_at),
-        "requested_revenue": total(requested),
-        "recovered_requested_revenue": total(recovered),
-        "booked_revenue": None,
-        "revenue": None,
-    }
-
-
 def test_funnel_derived_from_events_alone_matches_leads_csv(frozen_clock):
     """
     دليل Gate A: "تقرير قمع مشتق من events.jsonl وحده".
@@ -543,3 +473,90 @@ def test_recovered_attribution_is_derivable_from_event_order(frozen_clock):
     derived = funnel_from_events(read_events(), now=FrozenDatetime.frozen_at)
     assert derived["recovered_leads"] == 1
     assert derived["booking_requests"] == 2
+
+
+# ------------------------------- 7) التقريران المتعايشان (دليل Gate A)
+
+def _two_leads_one_recovered(clock):
+    """سيناريو صغير يملأ كل خانة يملكها المخزنان معاً."""
+    organic = record_price_quote(user_id="R1", service_name=SERVICE_BOTOX, channel="telegram")
+    assisted = record_price_quote(user_id="R2", service_name=SERVICE_LASER, channel="telegram")
+    record_booking_request(lead_id=organic, contact_info="ر 0770")
+    advance(clock, hours=25)
+    mark_followup_sent(lead_id=assisted, new_stage="1")
+    record_booking_request(lead_id=assisted, contact_info="ز 0771")
+
+
+def test_the_events_report_reads_no_leads_csv_at_all(frozen_clock, tmp_path, monkeypatch):
+    """
+    ادّعاء «من events.jsonl وحده» مُثبَتاً لا موصوفاً: يُسحب leads.csv
+    من تحت التقرير كلياً - يُوجَّه المسار إلى ملف غير موجود - ثم
+    يُطلب التقرير كاملاً.
+
+    بلا هذا الاختبار كان الاستقلال جملةً في ترويسة الوحدة: استيراد
+    واحد كسول من leads_store يكفي لكسره بلا أن يحمرّ شيء، ما دام
+    الملف الحقيقي موجوداً دائماً أثناء الاختبارات.
+    """
+    _two_leads_one_recovered(frozen_clock)
+    metrics_before = events_funnel.funnel_from_events(read_events(), now=FrozenDatetime.frozen_at)
+
+    # leads.csv لم يعد موجوداً بأي معنى. المسار يبقى داخل tmp_path -
+    # حارس العزل في conftest يفرض ذلك، والاختبار لا يستثني نفسه منه.
+    missing = tmp_path / "لا-يوجد" / "leads.csv"
+    monkeypatch.setattr(leads_store, "LEADS_FILE", str(missing))
+    assert not missing.exists()
+
+    metrics_after = events_funnel.funnel_from_events(read_events(), now=FrozenDatetime.frozen_at)
+    rendered = lead_recovery_report.render_report(metrics_after)
+
+    assert metrics_after == metrics_before
+    assert metrics_after["qualified_leads"] == 2
+    assert metrics_after["recovered_leads"] == 1
+    assert metrics_after["potential_revenue"] > 0
+    # والتقرير يُرسم كاملاً، لا يسقط عند أول رقم
+    assert "Qualified Leads:" in rendered
+    assert "Recovered Leads:" in rendered
+
+
+def test_both_reports_render_identically_from_their_two_stores(frozen_clock):
+    """
+    التقريران يتعايشان ولا يحلّ أحدهما محل الآخر. تطابقهما هو الدليل؛
+    واختلافهما يوماً ما هو الإنذار الوحيد الذي يكشف انحراف السجل عن
+    الملف. يُقارَن النص المرسوم لا القاموس وحده: التقريران يمرّان
+    بنفس render_report، فأي فرق في المخرجات فرقٌ في الأرقام.
+    """
+    _two_leads_one_recovered(frozen_clock)
+
+    from_csv = lead_recovery_report.render_report(compute_funnel_metrics())
+    from_events = lead_recovery_report.render_report(
+        events_funnel.funnel_from_events(read_events(), now=FrozenDatetime.frozen_at)
+    )
+
+    assert from_events == from_csv
+    assert "لا يُسمّى رقم «إيراداً» إلا عند الحضور" in from_events
+
+
+def test_the_script_entry_point_reads_the_log_and_needs_no_argument(frozen_clock):
+    """
+    نقطة دخول السكربت نفسها - لا الدالة الداخلية وحدها. سكربت لا
+    يُستدعى في أي اختبار يتعفّن بصمت.
+    """
+    _two_leads_one_recovered(frozen_clock)
+
+    metrics = events_funnel.compute_funnel_metrics_from_events(now=FrozenDatetime.frozen_at)
+    assert metrics == events_funnel.funnel_from_events(
+        read_events(), now=FrozenDatetime.frozen_at
+    )
+    assert metrics["qualified_leads"] == 2
+
+
+def test_an_empty_log_reports_zeroes_not_a_crash():
+    """سجل غير موجود حالة صحيحة: تقرير أصفار، لا استثناء."""
+    metrics = events_funnel.compute_funnel_metrics_from_events(now=datetime.now())
+
+    assert metrics["qualified_leads"] == 0
+    assert metrics["potential_revenue"] == 0
+    # والطبقات التي لا مصدر لها تبقى None لا صفراً - الفرق مقصود (§8)
+    assert metrics["revenue"] is None
+    assert metrics["booked_revenue"] is None
+    assert "غير متاح" in lead_recovery_report.render_report(metrics)
