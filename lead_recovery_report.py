@@ -64,4 +64,11 @@ def render_report(metrics: dict) -> str:
 
 
 if __name__ == "__main__":
+    import sys
+
+    # التقرير عربي بالكامل، وطرفية ويندوز الافتراضية cp1252. بلا هذا
+    # السطر يموت السكربت بـUnicodeEncodeError لحظة توجيه مخرجاته إلى
+    # ملف أو أنبوب - أي في كل استعمال غير تفاعلي، وهو استعمال تقرير.
+    sys.stdout.reconfigure(encoding="utf-8")
+
     print(render_report(compute_funnel_metrics()))

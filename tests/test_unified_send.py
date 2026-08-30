@@ -87,21 +87,85 @@ def quote_lead(user_id="u1", text="كم سعر البوتوكس؟"):
 
 # =================================================== 1) المسار واحد
 
+CHANNEL_CALL_ALLOWED = {"channel_interface.py", "telegram_channel.py", "outbound.py"}
+
+
+def modules_calling_the_channel_directly(root: Path) -> list[str]:
+    """
+    يمسح شجرة `root` كاملة بحثاً عن استدعاء مباشر لـ`send_message`.
+
+    rglob لا glob: المسح المسطّح على الجذر وحده كان يترك `storage/`
+    وأي حزمة فرعية تُضاف لاحقاً بلا فحص - وهي بالضبط الأماكن التي
+    يولد فيها مسار إرسال ثانٍ بلا أن يلاحظه أحد.
+
+    الجذر معامل لا ثابت حتى يُمكن إثبات أن الماسح يمسك مخالفة مزروعة
+    في مجلد فرعي، بلا كتابة أي شيء داخل المستودع نفسه.
+    """
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if path.name in CHANNEL_CALL_ALLOWED:
+            continue
+        # الاختبارات تبني قنوات مزيَّفة وتستدعيها عمداً؛ والمجلدات
+        # المخفية وذاكرة بايت المؤقتة ليست مصدراً يُقرأ أصلاً.
+        if any(part == "tests" or part == "__pycache__" or part.startswith(".")
+               for part in relative.parts):
+            continue
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"\.send_message\s*\(", line):
+                offenders.append(f"{relative.as_posix()}:{i}")
+    return offenders
+
+
 def test_no_module_calls_the_channel_outside_the_unified_path():
     """
     الحارس البنيوي لـF5: مسار إرسال ثانٍ يعود صامتاً ما لم يمنعه شيء.
     `send_message` مسموح تعريفه في العقد وتنفيذه في الكونيكتور، ومسموح
     استدعاؤه في outbound وحده.
     """
-    allowed = {"channel_interface.py", "telegram_channel.py", "outbound.py"}
-    offenders = []
-    for path in PROJECT_ROOT.glob("*.py"):
-        if path.name in allowed:
-            continue
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if re.search(r"\.send_message\s*\(", line):
-                offenders.append(f"{path.name}:{i}")
+    offenders = modules_calling_the_channel_directly(PROJECT_ROOT)
     assert offenders == [], f"استدعاء مباشر للقناة خارج outbound: {offenders}"
+
+
+def test_the_structural_guard_catches_a_violation_in_a_subdirectory(tmp_path):
+    """
+    الحارس نفسه مُختبَراً، لا مُفترَضاً.
+
+    الماسح كان يمرّ على جذر المشروع مسطَّحاً، فكان `storage/` خارج
+    نطاقه كلياً: مخالفة هناك تمرّ خضراء. الاختبار أعلاه لا يكشف هذا
+    أبداً - نجاحه يعني «لا مخالفة» و«لا بحث» على السواء.
+
+    هنا تُزرع مخالفة في مجلد فرعي داخل tmp_path ويُطلب من نفس الماسح
+    أن يجدها. لا يُكتب شيء داخل المستودع.
+    """
+    (tmp_path / "clean.py").write_text("x = 1\n", encoding="utf-8")
+    nested = tmp_path / "storage" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "sneaky.py").write_text(
+        "def go(channel, msg):\n    return channel.send_message(msg)\n", encoding="utf-8"
+    )
+
+    offenders = modules_calling_the_channel_directly(tmp_path)
+
+    assert offenders == ["storage/deep/sneaky.py:2"], offenders
+
+
+def test_the_structural_guard_still_honours_its_allowlist_and_exclusions(tmp_path):
+    """
+    والوجه الآخر: ماسح يبلّغ عن كل شيء ليس حارساً بل ضجيج يُسكَت.
+    الملفات الثلاثة المسموح لها، وشجرة الاختبارات، تبقى خارج البلاغ
+    حتى وهي تحمل الاستدعاء نفسه حرفياً.
+    """
+    call = "channel.send_message(m)\n"
+    (tmp_path / "outbound.py").write_text(call, encoding="utf-8")
+    (tmp_path / "telegram_channel.py").write_text(call, encoding="utf-8")
+    (tmp_path / "channel_interface.py").write_text(call, encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(call, encoding="utf-8")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "cached.py").write_text(call, encoding="utf-8")
+
+    assert modules_calling_the_channel_directly(tmp_path) == []
 
 
 def test_router_sends_through_outbound(monkeypatch):
@@ -297,7 +361,7 @@ def test_marking_outside_the_send_path_leaves_variant_empty():
     ("v1", ["شلونكم؟"], "services_list.v1"),
     ("v2", ["كم سعر البوتوكس؟"], "price_quote.v1"),
     ("v3", ["بوتوكس", "نعم"], "ask_contact_info.v1"),
-    ("v4", ["بوتوكس", "نعم", "سارة 0770"], "booking_request_ack.v1"),
+    ("v4", ["بوتوكس", "نعم", "سارة 07701234567"], "booking_request_ack.v1"),
     ("v5", ["بوتوكس", "لا"], "decline_ack.v1"),
     ("v6", ["بوتوكس", "خلي أفكر"], "hesitant_ack.v1"),
     ("v7", ["بوتوكس", "شنو يعني؟"], "booking_reply_reprompt.v1"),
@@ -422,8 +486,8 @@ def test_today_every_intent_has_exactly_one_variant():
     for variant_id in variants.all_variant_ids():
         per_intent.setdefault(variants.intent_of(variant_id), []).append(variant_id)
     assert all(len(ids) == 1 for ids in per_intent.values())
-    # 10 + نيّتا كشف الغموض (التغيير #6): ambiguity_question، ambiguity_reprompt
-    assert len(per_intent) == 12
+    # 10 + نيّتا كشف الغموض (التغيير #6) + إعادة سؤال بيانات التواصل (#7)
+    assert len(per_intent) == 13
 
 
 def test_template_hash_changes_when_the_template_changes():
