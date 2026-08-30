@@ -22,6 +22,13 @@ import leads_store
 from leads_store import (
     FIELDNAMES,
     LEAD_ID_COLUMN,
+    OUTCOME_EXPIRED,
+    OUTCOME_ORGANIC,
+    OUTCOME_PENDING,
+    OUTCOME_RECOVERED,
+    STATE_BOOKING_REQUESTED,
+    STATE_LEGACY_UNKNOWN,
+    STATE_PRICE_QUOTED,
     mark_expired,
     mark_followup_sent,
     save_lead,
@@ -85,8 +92,8 @@ def frozen_clock(monkeypatch):
 # ------------------------------------------- 1) ثبات lead_id عبر الجلسات
 
 def test_save_lead_returns_prefixed_unique_id():
-    first = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status="not_ready")
-    second = save_lead(user_id="901", service_name=SERVICE, channel="telegram", status="not_ready")
+    first = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
+    second = save_lead(user_id="901", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
 
     assert first.startswith(leads_store.LEAD_ID_PREFIX)
     assert second.startswith(leads_store.LEAD_ID_PREFIX)
@@ -101,7 +108,7 @@ def test_lead_id_never_changes_through_any_write_path(isolated_leads_file):
     متابعة أولى، متابعة ثانية، إنهاء، ثم كتابة صف جديد لعميل آخر
     (تُعيد كتابة الملف كاملاً). المعرّف يجب ألا يتزحزح في أي نقطة.
     """
-    lead_id = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status="not_ready")
+    lead_id = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
 
     def current_row():
         rows = [r for r in read_rows() if r["معرف العميل"] == "900"]
@@ -118,9 +125,9 @@ def test_lead_id_never_changes_through_any_write_path(isolated_leads_file):
 
     assert mark_expired(lead_id=lead_id) is True
     assert current_row()[LEAD_ID_COLUMN] == lead_id
-    assert current_row()["نتيجة المتابعة"] == "منتهي"
+    assert current_row()["نتيجة المتابعة"] == OUTCOME_EXPIRED
 
-    save_lead(user_id="999", service_name=OTHER_SERVICE, channel="telegram", status="not_ready")
+    save_lead(user_id="999", service_name=OTHER_SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
     assert current_row()[LEAD_ID_COLUMN] == lead_id
 
     # وقراءات متكررة من القرص لا تولّد شيئاً جديداً
@@ -136,6 +143,7 @@ leads_store.LEADS_FILE = sys.argv[2]
 leads_store.LOCK_FILE = sys.argv[2] + ".lock"
 leads_store.BACKUP_FILE = sys.argv[2] + ".backup-pre-lead-id"
 leads_store.BACKUP_FILE_PRICE_QUOTE = sys.argv[2] + ".backup-pre-price-quote-lead"
+leads_store.BACKUP_FILE_STATUS_VOCABULARY = sys.argv[2] + ".backup-pre-status-vocabulary"
 rows = leads_store._read_all_rows()
 print("RESULT:" + json.dumps([r["lead_id"] for r in rows]))
 """
@@ -160,8 +168,8 @@ def test_lead_id_stable_across_separate_processes(isolated_leads_file):
     ثبات عبر جلسات فعلية: عمليتان منفصلتان تقرآن نفس الملف بعد
     الكتابة، ولا واحدة منهما تولّد معرّفاً جديداً أو تغيّر الموجود.
     """
-    first = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status="not_ready")
-    second = save_lead(user_id="901", service_name=SERVICE, channel="whatsapp", status="not_ready")
+    first = save_lead(user_id="900", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
+    second = save_lead(user_id="901", service_name=SERVICE, channel="whatsapp", status=STATE_PRICE_QUOTED)
 
     assert _read_lead_ids_in_fresh_process(isolated_leads_file) == [first, second]
     assert _read_lead_ids_in_fresh_process(isolated_leads_file) == [first, second]
@@ -177,7 +185,7 @@ def test_same_second_same_customer_same_service_no_collision(frozen_clock):
     المفتاح الثلاثي (عميل + خدمة + طابع زمني) يفشل فيها.
     """
     lead_ids = [
-        save_lead(user_id="777", service_name=SERVICE, channel="telegram", status="not_ready")
+        save_lead(user_id="777", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
         for _ in range(50)
     ]
 
@@ -197,8 +205,8 @@ def test_same_second_leads_are_updated_independently(frozen_clock):
     وإنهاء الآخر يجب أن يصيب الصف المقصود وحده - لا الأول الذي
     تصادفه المطابقة.
     """
-    first = save_lead(user_id="777", service_name=SERVICE, channel="telegram", status="not_ready")
-    second = save_lead(user_id="777", service_name=SERVICE, channel="telegram", status="not_ready")
+    first = save_lead(user_id="777", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
+    second = save_lead(user_id="777", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
     assert first != second
 
     assert mark_followup_sent(lead_id=second, new_stage="1") is True
@@ -208,15 +216,15 @@ def test_same_second_leads_are_updated_independently(frozen_clock):
     assert len(by_id) == 2
 
     assert by_id[second]["مرحلة المتابعة"] == "1"
-    assert by_id[second]["نتيجة المتابعة"] == ""
+    assert by_id[second]["نتيجة المتابعة"] == OUTCOME_PENDING
 
     assert by_id[first]["مرحلة المتابعة"] == "0"
-    assert by_id[first]["نتيجة المتابعة"] == "منتهي"
+    assert by_id[first]["نتيجة المتابعة"] == OUTCOME_EXPIRED
 
 
 def test_mark_functions_reject_empty_lead_id():
     """معرّف فارغ يجب ألا يطابق الصفوف المهاجَرة أو أي صف آخر."""
-    save_lead(user_id="900", service_name=SERVICE, channel="telegram", status="not_ready")
+    save_lead(user_id="900", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
 
     assert mark_followup_sent(lead_id="", new_stage="1") is False
     assert mark_expired(lead_id="") is False
@@ -224,7 +232,7 @@ def test_mark_functions_reject_empty_lead_id():
 
     row = read_rows()[0]
     assert row["مرحلة المتابعة"] == "0"
-    assert row["نتيجة المتابعة"] == ""
+    assert row["نتيجة المتابعة"] == OUTCOME_PENDING
 
 
 # ------------------------------------------------------ 3) سلامة الهجرة
@@ -258,8 +266,11 @@ def test_migration_from_v1_preserves_data_and_assigns_ids(isolated_leads_file):
     assert rows[0]["التاريخ والوقت"] == "2026-08-01 10:00:00"
     assert rows[0]["مرحلة المتابعة"] == "1"          # "تمت المتابعة" = نعم
 
+    # V1 لا يحمل status_reason، فلا دليل على سبب `not_ready` -> لا يُخمَّن
+    assert rows[0]["الحالة"] == STATE_LEGACY_UNKNOWN
+
     assert rows[1]["بيانات التواصل"] == "سارة 0770"
-    assert rows[1]["الحالة"] == "confirmed"
+    assert rows[1]["الحالة"] == STATE_BOOKING_REQUESTED   # كانت "confirmed"
     assert rows[1]["مرحلة المتابعة"] == "0"          # "تمت المتابعة" = لا
 
 
@@ -271,6 +282,10 @@ def test_migration_from_v2_preserves_recovered_row_verbatim(isolated_leads_file)
     النسخة السابقة من الهجرة كانت تكتب "" في السعر وتاريخ آخر متابعة
     ونتيجة المتابعة، و"0" في مرحلة المتابعة، لأنها تفترض أن أي ملف
     غير مطابق للترويسة هو V1. هذا الاختبار هو الذي يمسك ذلك السلوك.
+
+    "الحالة" هو الحقل الوحيد الذي تغيّره مواءمة المفردات عمداً، فخرج
+    من حلقة المطابقة الحرفية إلى تأكيد صريح على الترجمة. بقية حقول
+    V2 تبقى تحت الشرط الصارم كما كانت.
     """
     recovered = {
         "التاريخ والوقت": "2026-08-10 09:00:00",
@@ -303,24 +318,26 @@ def test_migration_from_v2_preserves_recovered_row_verbatim(isolated_leads_file)
 
     migrated = rows[0]
     assert migrated["سعر الخدمة وقت الإنشاء"] == "150,000 دينار"
-    assert migrated["نتيجة المتابعة"] == "مسترجَع"
+    assert migrated["نتيجة المتابعة"] == OUTCOME_RECOVERED
     assert migrated["تاريخ آخر متابعة"] == "2026-08-14 08:30:00"
     assert migrated["مرحلة المتابعة"] == "2"
 
-    # ولا حقل واحد من V2 تغيّر في أي من الصفين
+    # "الحالة" وحدها تُترجَم: V2 بلا status_reason، فلا دليل على السبب
+    assert all(r["الحالة"] == STATE_LEGACY_UNKNOWN for r in rows)
+
+    # ولا حقل واحد آخر من V2 تغيّر في أي من الصفين
+    preserved_fields = [f for f in V2_FIELDNAMES if f != "الحالة"]
     for original, after in zip([recovered, untouched], rows):
-        for field in V2_FIELDNAMES:
+        for field in preserved_fields:
             assert after[field] == original[field], f"الحقل '{field}' تغيّر أثناء الهجرة"
         assert after[LEAD_ID_COLUMN].startswith(leads_store.LEAD_ID_PREFIX)
 
     assert len({r[LEAD_ID_COLUMN] for r in rows}) == 2
 
     # والمؤشرات المشتقة تبقى صحيحة بعد الهجرة
-    assert leads_store.compute_recovery_metrics() == {
-        "leads_recovered": 1,
-        "bookings_recovered": 1,
-        "revenue_recovered": 150000,
-    }
+    metrics = leads_store.compute_funnel_metrics()
+    assert metrics["recovered_leads"] == 1
+    assert metrics["recovered_requested_revenue"] == 150000
 
 
 def test_migration_is_idempotent(isolated_leads_file):
@@ -398,13 +415,13 @@ def test_backup_is_taken_once_before_first_write(isolated_leads_file):
     assert backup.read_bytes() == content_before
 
     # كتابات لاحقة لا تلمس النسخة الاحتياطية
-    save_lead(user_id="555", service_name=SERVICE, channel="telegram", status="not_ready")
+    save_lead(user_id="555", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
     assert backup.read_bytes() == content_before
 
 
 def test_no_backup_on_clean_start(isolated_leads_file):
     """لا ملف سابق = لا شيء يستحق النسخ."""
-    save_lead(user_id="900", service_name=SERVICE, channel="telegram", status="not_ready")
+    save_lead(user_id="900", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
     assert not Path(leads_store.BACKUP_FILE).exists()
 
 
@@ -415,33 +432,33 @@ def test_identity_key_separates_same_user_id_on_different_channels():
     PRD D4: نفس المعرّف الرقمي على telegram وwhatsapp عميلان مختلفان.
     حجز عميل telegram يجب ألا يُعلّم صف عميل whatsapp كمُسترجَع.
     """
-    telegram_lead = save_lead(user_id="555", service_name=SERVICE, channel="telegram", status="not_ready")
-    whatsapp_lead = save_lead(user_id="555", service_name=SERVICE, channel="whatsapp", status="not_ready")
+    telegram_lead = save_lead(user_id="555", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
+    whatsapp_lead = save_lead(user_id="555", service_name=SERVICE, channel="whatsapp", status=STATE_PRICE_QUOTED)
 
     mark_followup_sent(lead_id=telegram_lead, new_stage="1")
     mark_followup_sent(lead_id=whatsapp_lead, new_stage="1")
 
     save_lead(user_id="555", service_name=SERVICE, channel="telegram",
-              status="confirmed", contact_info="سارة 0770")
+              status=STATE_BOOKING_REQUESTED, contact_info="سارة 0770")
 
     by_id = {r[LEAD_ID_COLUMN]: r for r in read_rows()}
 
-    assert by_id[telegram_lead]["نتيجة المتابعة"] == "مسترجَع"
-    assert by_id[whatsapp_lead]["نتيجة المتابعة"] == ""
+    assert by_id[telegram_lead]["نتيجة المتابعة"] == OUTCOME_RECOVERED
+    assert by_id[whatsapp_lead]["نتيجة المتابعة"] == OUTCOME_PENDING
 
-    metrics = leads_store.compute_recovery_metrics()
-    assert metrics["leads_recovered"] == 1
+    metrics = leads_store.compute_funnel_metrics()
+    assert metrics["recovered_leads"] == 1
 
 
 def test_identity_key_does_not_merge_channels_on_direct_booking():
-    """الحجز المباشر بلا متابعة يُعلَّم "أُغلق" - وعلى قناته وحدها."""
-    telegram_lead = save_lead(user_id="555", service_name=SERVICE, channel="telegram", status="not_ready")
-    whatsapp_lead = save_lead(user_id="555", service_name=SERVICE, channel="whatsapp", status="not_ready")
+    """الحجز المباشر بلا متابعة يُعلَّم "عضوي" (organic) - وعلى قناته وحدها."""
+    telegram_lead = save_lead(user_id="555", service_name=SERVICE, channel="telegram", status=STATE_PRICE_QUOTED)
+    whatsapp_lead = save_lead(user_id="555", service_name=SERVICE, channel="whatsapp", status=STATE_PRICE_QUOTED)
 
     save_lead(user_id="555", service_name=SERVICE, channel="whatsapp",
-              status="confirmed", contact_info="سارة 0770")
+              status=STATE_BOOKING_REQUESTED, contact_info="سارة 0770")
 
     by_id = {r[LEAD_ID_COLUMN]: r for r in read_rows()}
 
-    assert by_id[whatsapp_lead]["نتيجة المتابعة"] == "أُغلق"
-    assert by_id[telegram_lead]["نتيجة المتابعة"] == ""
+    assert by_id[whatsapp_lead]["نتيجة المتابعة"] == OUTCOME_ORGANIC
+    assert by_id[telegram_lead]["نتيجة المتابعة"] == OUTCOME_PENDING

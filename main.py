@@ -4,7 +4,7 @@
 [Phase 3B] USE_AI_INTENT (متغير بيئة، افتراضياً false):
   false -> النظام Rule-Based بالكامل، ولا يُستدعى GPT/OpenAI إطلاقاً
            (سلوك 3A.1 حرفياً، بلا أي اتصال بـOpenAI)
-  true  -> ai_intent يؤثر فقط داخل awaiting_booking_confirmation،
+  true  -> ai_intent يؤثر فقط داخل awaiting_booking_reply،
            وفقط للقيم الآمنة الثلاث (confirm_booking/decline/hesitant)
 
 Rollback فوري: إعادة USE_AI_INTENT إلى false يعيد النظام بالكامل

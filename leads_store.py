@@ -1,17 +1,36 @@
 """
 تسجيل طلبات الحجز والاستفسارات (Leads) + محرك Lead Recovery
 ======================================================================
-حفظ بسيط في ملف CSV. يسجل كل استفسار (confirmed/not_ready)، مع سعر
-الخدمة كما كان وقت إنشاء السجل (Snapshot)، ويدير دورة حياة المتابعة
-على مرحلتين:
+حفظ بسيط في ملف CSV. يسجل كل استفسار، مع سعر الخدمة كما كان وقت
+إنشاء السجل (Snapshot)، ويدير دورة حياة المتابعة على مرحلتين:
 
-  not_ready --24h--> Follow-up 1 --72h--> Follow-up 2 --> Recovered/Expired
+  price_quoted --24h--> Follow-up 1 --72h--> Follow-up 2 --> Recovered/Expired
 
-"نتيجة المتابعة":
+[مفردات الحالة - PRD §8/D2]
+عمود "الحالة" يحمل حالة الـLead في دورة الحياة (§7) بمصطلحات §8:
+  price_quoted      : سُعِّرت، لم تُجب بعد (Qualified Lead)
+  declined          : رفضت صراحةً
+  booking_requested : سلّمت بياناتها - Booking Request، *ليس* حجزاً مؤكداً
+  legacy_unknown    : صف ما قبل هذه المواءمة، لا دليل على سبب حالته
+
+القيمتان القديمتان `confirmed` و`not_ready` حُذفتا: كلتاهما كانت تقيس
+شيئاً غير ما تسمّيه (F2). `confirmed` كان يعني "أرسلت رقمها" بينما
+Confirmed Booking في §8 هو تأكيد الموظفة - حدث خارج النظام كلياً.
+
+"نتيجة المتابعة" (الإسناد §9.1 + الانتهاء §7):
   ""        : لم يُحسم بعد
-  "مسترجَع"  : حجزت بعد متابعة واحدة على الأقل
-  "أُغلق"    : حجزت مباشرة قبل أي متابعة (لا تُحتسب كاسترجاع)
+  "مسترجَع"  : حجزت بعد متابعة واحدة على الأقل (followup_assisted)
+  "عضوي"    : حجزت مباشرة قبل أي متابعة (organic) - كانت "أُغلق"،
+              وهو اسم يوحي بفرصة خاسرة بينما هي حجز ناجح بلا فضل لنا
   "منتهي"   : وصلت للمتابعة الثانية دون حجز
+
+[لا إيراد قبل الحضور - PRD §8، القاعدة الحمراء]
+compute_funnel_metrics() لا تُسمّي أي رقم "إيراداً". الطبقات الثلاث
+العليا تحمل أسماءها الكاملة (Potential / Requested / Booked)، وطبقتا
+Booked Revenue وRevenue تُرجَعان None لا صفراً: الصفر قياسٌ يقول
+"قِسنا فوجدنا لا شيء"، وNone يقول "لا بيانات" - وهذا هو الصدق الوحيد
+الممكن اليوم، إذ لا بيانات حضور في النظام ولا مسار للحصول عليها قبل
+Clinic Feedback Loop (§11).
 
 [الهوية والمعرّف - PRD D3/D4]
 كل صف يحمل `lead_id` مستقراً يُولَّد مرة واحدة فقط ولا يتغير أبداً
@@ -25,23 +44,23 @@
 [إنشاء الـLead لحظة عرض السعر - PRD D1]
 `record_price_quote()` هي مسار الإنشاء الحقيقي: تُستدعى لحظة الرد
 بالسعر، لا عند تسليم البيانات. الصمت حالة مشروعة - الصف يُكتب فوراً
-بـ`الحالة = not_ready` و`status_reason = price_quoted`، فيصير مؤهلاً
-لدورة المتابعة تلقائياً بعد نافذة الصمت (شرط الـ24 ساعة في
-get_leads_eligible_for_first_followup هو نفسه نافذة الصمت في PRD §8).
-لا قيمة جديدة في عمود "الحالة": مواءمة المفردات مع §8 عمل منفصل.
+بـ`الحالة = price_quoted`، فيصير مؤهلاً لدورة المتابعة تلقائياً بعد
+نافذة الصمت (SILENCE_WINDOW_HOURS، وهي نفسها عتبة أهلية المتابعة
+الأولى - رقم واحد لا رقمان).
 
 الردود اللاحقة تُحدِّث نفس الصف عبر lead_id ولا تُنشئ صفاً ثانياً:
   record_booking_request()  - وافقت وسلّمت بياناتها
-  record_status_reason()    - رفضت صراحة أو ترددت
+  record_decline()          - رفضت صراحة (تنقل الحالة إلى declined)
+  record_hesitation()       - ترددت (إشارة فقط، الحالة لا تتغير)
 
 `save_lead()` تبقى كما هي حرفياً: تُلحق صفاً دون شرط. المنع من
 التكرار يعيش في record_price_quote وحدها - وهذا مقصود، فاستفساران
 في نفس الثانية عبر save_lead يبقيان Leadين منفصلين (PRD §6).
 
 [النسخة الاحتياطية] قبل أول كتابة على leads.csv يُنسَخ الملف كما هو
-إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE، مرة واحدة فقط لكل اسم،
-فيبقى لديك دائماً لقطة سليمة على القرص لكل تغيير يمسّ دلالة الصفوف
-لا شكلها فقط.
+إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE وBACKUP_FILE_STATUS_VOCABULARY،
+مرة واحدة فقط لكل اسم، فيبقى لديك دائماً لقطة سليمة على القرص لكل
+تغيير يمسّ دلالة الصفوف لا شكلها فقط.
 
 [حماية التزامن] كل عملية تُعدِّل الملف (save_lead, mark_followup_sent,
 mark_expired, الهجرة التلقائية) تُنفَّذ بالكامل (قراءة+تعديل+كتابة)
@@ -70,14 +89,49 @@ LEADS_FILE = "leads.csv"
 LOCK_FILE = LEADS_FILE + ".lock"
 BACKUP_FILE = LEADS_FILE + ".backup-pre-lead-id"
 BACKUP_FILE_PRICE_QUOTE = LEADS_FILE + ".backup-pre-price-quote-lead"
+BACKUP_FILE_STATUS_VOCABULARY = LEADS_FILE + ".backup-pre-status-vocabulary"
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 LEAD_ID_COLUMN = "lead_id"
 LEAD_ID_PREFIX = "ld_"
 
-# حقل تقني بقيم إنجليزية - كما lead_id تماماً. يسجّل *لماذا* الصف
-# على حالته الحالية، دون المساس بمفردات عمود "الحالة" نفسه. هذه
-# القيم هي التي ستُحمَل لاحقاً في events.jsonl كما هي.
+# ---------------------------------------------------------------- مفردات الحالة
+# قيم عمود "الحالة" = حالة الـLead في دورة الحياة (PRD §7) بمصطلحات
+# §8/D2 حرفياً. القيمتان السابقتان حُذفتا لأن كلتيهما كانت تكذب:
+#   `confirmed` = "أرسلت رقم هاتفها"، بينما Confirmed Booking في §8
+#                 محجوز لتأكيد الموظفة - وهو حدث لا يملكه النظام أصلاً.
+#   `not_ready` = "قالت لا صراحةً" فقط، بينما Unbooked Lead في §8
+#                 هو الصامت. الاسمان كانا يقيسان شيئاً غير ما يسمّيانه.
+STATE_PRICE_QUOTED = "price_quoted"
+STATE_DECLINED = "declined"
+STATE_BOOKING_REQUESTED = "booking_requested"
+
+# ليست حالة في §8 ولا تدّعي أنها كذلك: صف كُتب قبل مواءمة المفردات
+# بقيمة `not_ready` وبلا status_reason، فلا دليل في الملف على أنه
+# رفض صريح أم صمت بعد تسعير. تصنيفه تخميناً كان سيكتب ادّعاءً في
+# بيانات سنقيس عليها لاحقاً. يبقى مؤهلاً للمتابعة كما كان بالضبط،
+# ولا يدخل أي مقام في القياس (is_unbooked تستثنيه).
+STATE_LEGACY_UNKNOWN = "legacy_unknown"
+
+# الحالات التي ما زال الـLead فيها داخل قمع المتابعة. `declined` منها
+# عمداً: الرافضة صراحةً ما زالت تتلقى متابعات آلية اليوم (D-015، تأجيل
+# صريح يمسّ S7). هذا يحفظ سلوك المتابعة كما هو حرفياً بعد تغيير الأسماء.
+OPEN_STATES = (STATE_PRICE_QUOTED, STATE_DECLINED, STATE_LEGACY_UNKNOWN)
+
+# قيم عمود "نتيجة المتابعة" = الإسناد (PRD §9.1) + الانتهاء (§7).
+OUTCOME_PENDING = ""
+OUTCOME_RECOVERED = "مسترجَع"      # followup_assisted - Recovered Lead (§8)
+OUTCOME_ORGANIC = "عضوي"           # organic (§9.1) - حجزت بلا فضل للمتابعة
+OUTCOME_EXPIRED = "منتهي"          # EXPIRED (§7)
+
+# نافذة الصمت (PRD §8): بعدها يصير الـLead المُسعَّر الصامت Unbooked.
+# نفس عتبة الأهلية للمتابعة الأولى - رقم واحد باسمه الصريح، لا رقمان.
+SILENCE_WINDOW_HOURS = 24
+
+# حقل تقني بقيم إنجليزية - كما lead_id تماماً. يسجّل *الإشارة الأخيرة*
+# من العميلة، وهي سؤال مختلف عن سؤال عمود "الحالة": `hesitant` إشارة
+# لا حالة (لا مقابل لها في §7)، والصف يبقى price_quoted بعدها.
+# هذه القيم هي التي ستُحمَل لاحقاً في events.jsonl كما هي.
 STATUS_REASON_COLUMN = "status_reason"
 REASON_PRICE_QUOTED = "price_quoted"
 REASON_DECLINED = "declined"
@@ -107,6 +161,20 @@ _LEGACY_FIELDNAMES = [
     "التاريخ والوقت", "معرف العميل", "القناة", "الخدمة المطلوبة",
     "الحالة", "بيانات التواصل", _V1_LEGACY_COLUMN,
 ]
+
+# ------------------------------------------------- مفردات ما قبل المواءمة
+# `not_ready` وحدها لا تكفي لتحديد الحالة الجديدة: كانت تُكتب للرفض
+# الصريح وللصمت بعد التسعير معاً. status_reason هو الدليل الوحيد في
+# الملف، وحين يكون فارغاً لا دليل إطلاقاً -> STATE_LEGACY_UNKNOWN.
+_LEGACY_STATE_NOT_READY = "not_ready"
+_LEGACY_STATE_CONFIRMED = "confirmed"
+_LEGACY_OUTCOME_ORGANIC = "أُغلق"
+
+_LEGACY_NOT_READY_BY_REASON = {
+    REASON_DECLINED: STATE_DECLINED,
+    REASON_PRICE_QUOTED: STATE_PRICE_QUOTED,
+    REASON_HESITANT: STATE_PRICE_QUOTED,
+}
 
 _thread_lock = threading.Lock()
 
@@ -241,6 +309,7 @@ def _backup_once_unlocked() -> None:
     for backup_path, label in (
         (BACKUP_FILE, "lead_id"),
         (BACKUP_FILE_PRICE_QUOTE, "إنشاء الـLead لحظة عرض السعر"),
+        (BACKUP_FILE_STATUS_VOCABULARY, "مواءمة مفردات الحالة مع PRD §8"),
     ):
         if os.path.exists(backup_path):
             continue
@@ -266,11 +335,50 @@ def _write_all_rows_unlocked(rows: list[dict]) -> None:
     os.replace(tmp_path, LEADS_FILE)
 
 
+def _remap_vocabulary(row: dict) -> dict:
+    """
+    يُرجع نسخة من الصف بمفردات §8، ولا يلمس أي حقل آخر.
+
+    ثلاث قواعد فقط، كلها اشتقاق من دليل موجود في الملف - لا تخمين:
+      confirmed         -> booking_requested   (الصف يعني: سلّمت بياناتها)
+      أُغلق             -> عضوي                (نفس المعنى، اسم لا يكذب)
+      not_ready         -> حسب status_reason، و legacy_unknown إن كان فارغاً
+
+    أي قيمة أخرى تمرّ كما هي حرفياً: ملف كُتب بيد أو بنسخة لا نعرفها
+    يبقى كما تركه صاحبه، ولا نخترع له تصنيفاً.
+    """
+    remapped = dict(row)
+
+    state = remapped.get("الحالة", "")
+    if state == _LEGACY_STATE_CONFIRMED:
+        remapped["الحالة"] = STATE_BOOKING_REQUESTED
+    elif state == _LEGACY_STATE_NOT_READY:
+        reason = (remapped.get(STATUS_REASON_COLUMN) or "").strip()
+        remapped["الحالة"] = _LEGACY_NOT_READY_BY_REASON.get(reason, STATE_LEGACY_UNKNOWN)
+
+    if remapped.get("نتيجة المتابعة", "") == _LEGACY_OUTCOME_ORGANIC:
+        remapped["نتيجة المتابعة"] = OUTCOME_ORGANIC
+
+    return remapped
+
+
+def _has_legacy_vocabulary(rows: list[dict]) -> bool:
+    return any(_remap_vocabulary(row) != row for row in rows)
+
+
 def _needs_migration(existing_fieldnames: list[str], rows: list[dict]) -> bool:
-    """الملف بحاجة لهجرة إذا اختلفت ترويسته، أو إذا وُجد فيه صف بلا lead_id."""
+    """
+    الملف بحاجة لهجرة إذا اختلفت ترويسته، أو وُجد فيه صف بلا lead_id،
+    أو حمل صف واحد مفردات ما قبل §8.
+
+    الترويسة وحدها لم تعد كافية دليلاً: هذه الهجرة تغيّر *قيماً* لا
+    أعمدة، فملف بترويسة صحيحة تماماً قد يكون كله بمفردات قديمة.
+    """
     if existing_fieldnames != FIELDNAMES:
         return True
-    return any(not (row.get(LEAD_ID_COLUMN) or "").strip() for row in rows)
+    if any(not (row.get(LEAD_ID_COLUMN) or "").strip() for row in rows):
+        return True
+    return _has_legacy_vocabulary(rows)
 
 
 def _migrate_file_if_needed_locked() -> None:
@@ -280,10 +388,15 @@ def _migrate_file_if_needed_locked() -> None:
       V1 (7 أعمدة، فيها "تمت المتابعة") -> الحالية
       V2 (10 أعمدة، بلا lead_id)        -> الحالية، بلا فقد أي حقل
       V3 (11 عموداً، بلا status_reason) -> الحالية، بلا فقد أي حقل
+      V4 (نفس الأعمدة، مفردات ما قبل §8) -> الحالية، بإعادة تسمية القيم
       الحالية                            -> خروج فوري، بلا أي كتابة
 
     الأعمدة المستجدة تُملأ "" لكل صف قائم: صف كُتب قبل هذا التغيير
     لا يُعرَف سبب حالته، و"" تقول ذلك بصدق بدل تخمينه.
+
+    مواءمة المفردات (V4) تغيّر *قيم* عمودين فقط - "الحالة" و"نتيجة
+    المتابعة" - عبر _remap_vocabulary، وبما لا يخترع تصنيفاً لصف لا
+    دليل عليه في الملف (يذهب إلى legacy_unknown).
 
     كل حقل يُنقَل كما هو عبر row.get(field). النسخة السابقة من هذه
     الدالة كانت تصفّر السعر ومرحلة المتابعة وتاريخها ونتيجتها لأنها
@@ -318,7 +431,7 @@ def _migrate_file_if_needed_locked() -> None:
         if is_v1:
             migrated["مرحلة المتابعة"] = "1" if row.get(_V1_LEGACY_COLUMN) == "نعم" else "0"
 
-        migrated_rows.append(migrated)
+        migrated_rows.append(_remap_vocabulary(migrated))
 
     _write_all_rows_unlocked(migrated_rows)
     print(
@@ -332,6 +445,16 @@ def _read_all_rows() -> list[dict]:
     with _locked():
         _migrate_file_if_needed_locked()
         return _read_all_rows_unlocked()
+
+
+def _outcome_for_stage(row: dict) -> str:
+    """
+    الإسناد (PRD §9.1) من عدّاد المتابعات وقت الحجز: حجزت بعد متابعة
+    واحدة على الأقل = مسترجَع (followup_assisted)، وإلا = عضوي
+    (organic). القاعدة نفسها التي كانت مكرّرة حرفياً في save_lead
+    وrecord_booking_request - نسخة واحدة تمنع انحرافهما عن بعضهما.
+    """
+    return OUTCOME_RECOVERED if row.get("مرحلة المتابعة", "0") in ("1", "2") else OUTCOME_ORGANIC
 
 
 def save_lead(user_id: str, service_name: str, channel: str, status: str, contact_info: str = "") -> str:
@@ -357,16 +480,15 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
         _migrate_file_if_needed_locked()
         rows = _read_all_rows_unlocked()
 
-        if status == "confirmed":
+        if status == STATE_BOOKING_REQUESTED:
             for row in rows:
                 if (
                     _same_identity(row, channel, user_id)
                     and row.get("الخدمة المطلوبة") == service_name
-                    and row.get("الحالة") == "not_ready"
-                    and row.get("نتيجة المتابعة", "") == ""
+                    and row.get("الحالة") in OPEN_STATES
+                    and row.get("نتيجة المتابعة", "") == OUTCOME_PENDING
                 ):
-                    stage = row.get("مرحلة المتابعة", "0")
-                    row["نتيجة المتابعة"] = "مسترجَع" if stage in ("1", "2") else "أُغلق"
+                    row["نتيجة المتابعة"] = _outcome_for_stage(row)
 
         lead_id = _new_lead_id()
         new_row = {
@@ -391,12 +513,15 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
 def _is_open_lead(row: dict) -> bool:
     """
     Lead "مفتوح" = نيّة تجارية لم تُحسم بعد: لا نتيجة متابعة (لا
-    مسترجَع ولا أُغلق ولا منتهي) ولم يُطلب حجزها.
+    مسترجَع ولا عضوي ولا منتهي) ولم يُطلب حجزها.
 
     Lead محسوم لا يُعاد استخدامه: عميلة حجزت ثم عادت تسأل عن نفس
     الخدمة بعد شهر نيّة تجارية جديدة، لا استكمال للأولى (PRD §6).
     """
-    return row.get("نتيجة المتابعة", "") == "" and row.get("الحالة") != "confirmed"
+    return (
+        row.get("نتيجة المتابعة", "") == OUTCOME_PENDING
+        and row.get("الحالة") != STATE_BOOKING_REQUESTED
+    )
 
 
 def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
@@ -407,11 +532,10 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
     PRD §8): وصل PRICE_QUOTED. الصمت بعدها حالة مشروعة - الصف موجود
     ويدخل دورة المتابعة وحده بعد نافذة الصمت، بلا أي فعل من العميلة.
 
-    الحالة المكتوبة `not_ready` بلا قيمة جديدة في عمود "الحالة":
-    شرط الـ24 ساعة في get_leads_eligible_for_first_followup هو نفسه
-    نافذة الصمت، فالصف الجديد (مرحلة 0، بلا نتيجة) يصير مؤهلاً بعد
-    24 ساعة صمت بالضبط، ويخرج من الأهلية فور تحديثه إن ردّت قبلها.
-    السبب الحقيقي مسجَّل في status_reason = price_quoted.
+    الحالة المكتوبة `price_quoted` هي حرفياً ما تعنيه (§7/§8): سُعِّرت
+    ولم تُجب بعد. الصف الجديد (مرحلة 0، بلا نتيجة) يصير مؤهلاً للمتابعة
+    بعد SILENCE_WINDOW_HOURS من الصمت بالضبط، ويخرج من الأهلية فور
+    تحديثه إن ردّت قبلها.
 
     idempotent لكل نيّة تجارية مفتوحة: إن كان للعميلة نفسها Lead
     مفتوح لنفس الخدمة على نفس القناة، يُرجَع معرّفه بلا كتابة - نفس
@@ -442,7 +566,7 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
             "معرف العميل": user_id,
             "القناة": channel,
             "الخدمة المطلوبة": service_name,
-            "الحالة": "not_ready",
+            "الحالة": STATE_PRICE_QUOTED,
             STATUS_REASON_COLUMN: REASON_PRICE_QUOTED,
             "بيانات التواصل": "",
             # لقطة السعر لحظة *عرضه* على العميلة فعلاً، لا لحظة كتابة
@@ -461,10 +585,14 @@ def record_booking_request(lead_id: str, contact_info: str) -> bool:
     العميلة وافقت وسلّمت بياناتها: يُحدَّث **نفس صف** عرض السعر عبر
     lead_id، فلا يُنتج مسار "نعم ثم بيانات" صفين.
 
-    نتيجة المتابعة تُحسب بنفس قاعدة save_lead حرفياً: "مسترجَع" إن
-    سبقتها متابعة (مرحلة 1 أو 2)، وإلا "أُغلق" - فلا يتغير أي رقم
-    تُخرجه compute_recovery_metrics عمّا كان يُخرجه المساران السابقان
-    (صف not_ready مُعلَّم + صف confirmed جديد).
+    الحالة تصير `booking_requested` - وهي حرفياً ما حدث (§8: Booking
+    Request = سلّمت بياناتها، *قبل* تأكيد الموظفة). لا يُكتب هنا شيء
+    اسمه حجز مؤكَّد: التأكيد والحضور حدثان تملكهما العيادة وحدها،
+    ولا يملك النظام أي مسار لكتابتهما (§5، §7).
+
+    نتيجة المتابعة تُحسب بنفس قاعدة save_lead حرفياً عبر
+    _outcome_for_stage - فلا يتغير أي رقم تُخرجه compute_funnel_metrics
+    عمّا كان يُخرجه المساران السابقان.
 
     نتيجة متابعة محسومة مسبقاً لا تُدهَس: Lead بلغ "منتهي" ثم حجز
     يُسجَّل حجزه ولا يُحتسب استرجاعاً - نفس تحفّظ save_lead، ولا يُضخَّم
@@ -477,10 +605,9 @@ def record_booking_request(lead_id: str, contact_info: str) -> bool:
         rows = _read_all_rows_unlocked()
         for row in rows:
             if row.get(LEAD_ID_COLUMN) == lead_id:
-                if row.get("نتيجة المتابعة", "") == "":
-                    stage = row.get("مرحلة المتابعة", "0")
-                    row["نتيجة المتابعة"] = "مسترجَع" if stage in ("1", "2") else "أُغلق"
-                row["الحالة"] = "confirmed"
+                if row.get("نتيجة المتابعة", "") == OUTCOME_PENDING:
+                    row["نتيجة المتابعة"] = _outcome_for_stage(row)
+                row["الحالة"] = STATE_BOOKING_REQUESTED
                 row[STATUS_REASON_COLUMN] = REASON_BOOKING_REQUESTED
                 row["بيانات التواصل"] = contact_info
                 _write_all_rows_unlocked(rows)
@@ -488,15 +615,35 @@ def record_booking_request(lead_id: str, contact_info: str) -> bool:
         return False
 
 
-def record_status_reason(lead_id: str, reason: str) -> bool:
-    """
-    يسجّل *سبب* حالة الـLead دون المساس بحالته: رفضت صراحة، أو ترددت.
+def _update_lead_row(lead_id: str, changes: dict) -> bool:
+    """تعديل حقول محددة في صف واحد بـlead_id. مسار مشترك، لا سلوك خاص به."""
+    if not lead_id:
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if row.get(LEAD_ID_COLUMN) == lead_id:
+                row.update(changes)
+                _write_all_rows_unlocked(rows)
+                return True
+        return False
 
-    عمود "الحالة" ومرحلة المتابعة ونتيجتها لا تتغير، فيبقى الصف مؤهلاً
-    للمتابعة كما هو. هذا سلوك مقصود ومُسجَّل (D-015): الرافضة صراحةً
-    ما زالت تتلقى متابعات آلية اليوم، تماماً كما كانت قبل هذا التغيير
-    حين كان الرفض يُنشئ صف not_ready جديداً. كتم المتابعة عنها قرار
-    سياسة مؤجَّل للتغيير رقم 3، ويمسّ S7.
+
+def record_decline(lead_id: str) -> bool:
+    """
+    رفضت صراحةً: الحالة تصير `declined` - وهي حالة أولى الدرجة في
+    دورة حياة §7، لا مجرد سبب مسجَّل في حقل جانبي.
+
+    مرحلة المتابعة ونتيجتها لا تتغيران، و`declined` داخل OPEN_STATES،
+    فيبقى الصف مؤهلاً للمتابعة كما هو تماماً. هذا سلوك مقصود ومُسجَّل
+    (D-015): الرافضة صراحةً ما زالت تتلقى متابعات آلية اليوم. كتم
+    المتابعة عنها قرار سياسة لا قرار تسمية، ويمسّ S7 - وهذا التغيير
+    يمسّ الأسماء وحدها فلا يحسمه.
+
+    صف بلغ booking_requested لا تُنزَع منه حالته: الجلسة تُمسح عند
+    الحجز فلا يمرّ هذا المسار عملياً، والحارس يمنع أن يمحو خطأ لاحق
+    حجزاً قائماً.
     """
     if not lead_id:
         return False
@@ -505,23 +652,40 @@ def record_status_reason(lead_id: str, reason: str) -> bool:
         rows = _read_all_rows_unlocked()
         for row in rows:
             if row.get(LEAD_ID_COLUMN) == lead_id:
-                row[STATUS_REASON_COLUMN] = reason
+                if row.get("الحالة") != STATE_BOOKING_REQUESTED:
+                    row["الحالة"] = STATE_DECLINED
+                row[STATUS_REASON_COLUMN] = REASON_DECLINED
                 _write_all_rows_unlocked(rows)
                 return True
         return False
 
 
-def get_leads_eligible_for_first_followup(hours_threshold: float = 24) -> list[dict]:
+def record_hesitation(lead_id: str) -> bool:
+    """
+    ترددت: إشارة تُسجَّل، ولا حالة تتغير.
+
+    `hesitant` ليست حالة في §7 ولا مصطلحاً في §8 - هي نيّة في شجرة
+    القرار (D-006/D-007). الـLead يبقى `price_quoted`: لم تُجب بعد،
+    وهذا بالضبط ما تقوله الحالة.
+    """
+    return _update_lead_row(lead_id, {STATUS_REASON_COLUMN: REASON_HESITANT})
+
+
+def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDOW_HOURS) -> list[dict]:
     """
     الشروط لم تتغير بحرف واحد. الذي تغيّر هو *من* يستوفيها: منذ
     record_price_quote صار الـLead الصامت يُكتب لحظة عرض السعر، فيمرّ
-    من هنا وحده بعد hours_threshold من الصمت. هذا العتبة الزمنية هي
-    "نافذة الصمت" في PRD §8 - لا حاجة لتمثيلها بحالة منفصلة.
+    من هنا وحده بعد hours_threshold من الصمت. هذه العتبة الزمنية هي
+    "نافذة الصمت" في PRD §8 - لا حاجة لتمثيلها بحالة مخزَّنة.
+
+    الفلتر صار `in OPEN_STATES` بدل `== "not_ready"`: القيمة الواحدة
+    القديمة انقسمت إلى ثلاث (price_quoted / declined / legacy_unknown)،
+    وكلها كانت not_ready وكلها تبقى مؤهلة - نفس المجموعة بالضبط.
     """
     eligible = []
     now = datetime.now()
     for row in _read_all_rows():
-        if row.get("الحالة") != "not_ready":
+        if row.get("الحالة") not in OPEN_STATES:
             continue
         if row.get("مرحلة المتابعة", "0") != "0":
             continue
@@ -540,7 +704,7 @@ def get_leads_eligible_for_second_followup(hours_threshold: float = 72) -> list[
     eligible = []
     now = datetime.now()
     for row in _read_all_rows():
-        if row.get("الحالة") != "not_ready":
+        if row.get("الحالة") not in OPEN_STATES:
             continue
         if row.get("مرحلة المتابعة", "0") != "1":
             continue
@@ -562,7 +726,7 @@ def get_leads_to_expire(hours_after_second_followup: float = 72) -> list[dict]:
     candidates = []
     now = datetime.now()
     for row in _read_all_rows():
-        if row.get("الحالة") != "not_ready":
+        if row.get("الحالة") not in OPEN_STATES:
             continue
         if row.get("مرحلة المتابعة", "0") != "2":
             continue
@@ -602,24 +766,90 @@ def mark_followup_sent(lead_id: str, new_stage: str) -> bool:
 
 def mark_expired(lead_id: str) -> bool:
     """يُعلّم صف Lead واحداً كـ"منتهي". المخاطبة بـlead_id وحده - كما في mark_followup_sent."""
-    if not lead_id:
-        return False
-    with _locked():
-        _migrate_file_if_needed_locked()
-        rows = _read_all_rows_unlocked()
-        for row in rows:
-            if row.get(LEAD_ID_COLUMN) == lead_id:
-                row["نتيجة المتابعة"] = "منتهي"
-                _write_all_rows_unlocked(rows)
-                return True
-        return False
+    return _update_lead_row(lead_id, {"نتيجة المتابعة": OUTCOME_EXPIRED})
 
 
-def compute_recovery_metrics() -> dict:
-    recovered_rows = [r for r in _read_all_rows() if r.get("نتيجة المتابعة") == "مسترجَع"]
-    revenue = sum(_parse_price_to_number(r.get("سعر الخدمة وقت الإنشاء", "")) for r in recovered_rows)
+def is_unbooked(row: dict, now: datetime | None = None,
+                hours_threshold: float = SILENCE_WINDOW_HOURS) -> bool:
+    """
+    Unbooked Lead (PRD §8): Qualified Lead لم يصل BOOKING_REQUESTED
+    خلال نافذة الصمت.
+
+    مشتقّة لا مخزَّنة: لا شيء في النظام يعمل بجدولة ليكتب هذه الحالة
+    لحظة انقضاء النافذة، ولو خُزِّنت لصارت قديمة بين تشغيل وآخر.
+    الشرط الزمني نفسه هو التعريف، فتُحسب عند القراءة.
+
+    الرفض الصريح **مستثنى** من هذا المقام: §7 يجعل DECLINED وUNBOOKED
+    فرعين شقيقين لا متداخلين، ونصّ §8 وحده يقرأ كأنه يشملهما. اعتُمد
+    §7 - وهو قراءة تصحيحية موثّقة للـPRD، لا تعديل عليه. الأثر: مقام
+    Recovery Rate يبقى "الصامتات" وحدهن، فلا يُخفَّض المعدل بمن رفضن
+    صراحةً - وهو مقلوب الخطأ الذي رصده الـAudit (مقام منقوص يضخّم
+    المعدل). legacy_unknown مستثنى كذلك: لا دليل يضعه في أي مقام.
+
+    صف "منتهي" يبقى Unbooked: كان صامتاً ولم يحجز أبداً - وهو بالضبط
+    ما يقيسه المقام.
+    """
+    if row.get("الحالة") != STATE_PRICE_QUOTED:
+        return False
+    try:
+        created = datetime.strptime(row["التاريخ والوقت"], TIMESTAMP_FORMAT)
+    except (ValueError, KeyError, TypeError):
+        return False
+    reference = now or datetime.now()
+    return (reference - created).total_seconds() / 3600 >= hours_threshold
+
+
+def _sum_prices(rows: list[dict]) -> int:
+    return sum(_parse_price_to_number(r.get("سعر الخدمة وقت الإنشاء", "")) for r in rows)
+
+
+def compute_funnel_metrics() -> dict:
+    """
+    مؤشرات القمع بمفردات PRD §8 حرفياً - وبلا رقم واحد اسمه "إيراد".
+
+    كل صف في الملف هو Qualified Lead بحكم وجوده: لا يُكتب صف إلا بعد
+    عرض سعر (record_price_quote) أو حجز (save_lead)، وكلاهما يعني أن
+    السعر عُرِض فعلاً.
+
+    طبقات الإيراد الأربع (§8) تُرجَع كلها بأسمائها الكاملة:
+
+      potential_revenue  - Σ سعر كل Qualified Lead      (حجم الفرصة)
+      requested_revenue  - Σ سعر كل Booking Request     (مؤشر مبكر)
+      booked_revenue     - None: يتطلب تأكيد الموظفة، والنظام لا يملكه
+      revenue            - None: يتطلب الحضور، ولا بيانات حضور إطلاقاً
+
+    None وليس صفراً - والفرق ليس شكلياً: الصفر قياسٌ ("قِسنا فوجدنا
+    لا شيء")، وNone غياب قياس ("لا بيانات"). صفرٌ في تقرير أمام عيادة
+    يُقرأ رقماً حقيقياً، وهذا بالضبط نوع الكذب الذي يعالجه F3.
+
+    recovered_completed_bookings هي وحدة الفوترة الوحيدة (§9.3)، وهي
+    None لنفس السبب. الدالة السابقة كانت تُرجع `bookings_recovered`
+    مساوياً لـ`leads_recovered` تماماً - نفس القائمة تُعدّ مرتين،
+    وأحد الاسمين يوحي بحجوزات مكتملة. الاسم الموحي حُذف، ومكانه رقم
+    صادق واحد: لا نعرف.
+
+    وتُرجع `recovered_requested_revenue` بدل `revenue_recovered`:
+    نفس الحساب حرفياً، باسم يقول ما يقيسه فعلاً - مجموع أسعار مقتبَسة
+    لحظة تسليم الهاتف، لا مالاً وصل العيادة.
+    """
+    rows = _read_all_rows()
+    now = datetime.now()
+
+    booking_requests = [r for r in rows if r.get("الحالة") == STATE_BOOKING_REQUESTED]
+    unbooked = [r for r in rows if is_unbooked(r, now)]
+    recovered = [r for r in rows if r.get("نتيجة المتابعة") == OUTCOME_RECOVERED]
+
     return {
-        "leads_recovered": len(recovered_rows),
-        "bookings_recovered": len(recovered_rows),
-        "revenue_recovered": revenue,
+        # الأعداد
+        "qualified_leads": len(rows),
+        "unbooked_leads": len(unbooked),
+        "booking_requests": len(booking_requests),
+        "recovered_leads": len(recovered),
+        "recovered_completed_bookings": None,
+        # طبقات الإيراد (§8)
+        "potential_revenue": _sum_prices(rows),
+        "requested_revenue": _sum_prices(booking_requests),
+        "recovered_requested_revenue": _sum_prices(recovered),
+        "booked_revenue": None,
+        "revenue": None,
     }

@@ -39,6 +39,9 @@ def isolated_leads_file(tmp_path, monkeypatch):
     monkeypatch.setattr(
         leads_store, "BACKUP_FILE_PRICE_QUOTE", str(leads_file) + ".backup-pre-price-quote-lead"
     )
+    monkeypatch.setattr(
+        leads_store, "BACKUP_FILE_STATUS_VOCABULARY", str(leads_file) + ".backup-pre-status-vocabulary"
+    )
     return leads_file
 
 
@@ -57,4 +60,9 @@ def isolated_sessions_file(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     monkeypatch.setattr(session_store, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(session_store, "SESSIONS_FILE", str(data_dir / "sessions.json"))
+    monkeypatch.setattr(
+        session_store,
+        "BACKUP_FILE_STATUS_VOCABULARY",
+        str(data_dir / "sessions.json") + ".backup-pre-status-vocabulary",
+    )
     return data_dir / "sessions.json"
