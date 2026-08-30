@@ -85,6 +85,8 @@ import threading
 import uuid
 from datetime import datetime
 
+import events
+
 LEADS_FILE = "leads.csv"
 LOCK_FILE = LEADS_FILE + ".lock"
 BACKUP_FILE = LEADS_FILE + ".backup-pre-lead-id"
@@ -117,6 +119,16 @@ STATE_LEGACY_UNKNOWN = "legacy_unknown"
 # عمداً: الرافضة صراحةً ما زالت تتلقى متابعات آلية اليوم (D-015، تأجيل
 # صريح يمسّ S7). هذا يحفظ سلوك المتابعة كما هو حرفياً بعد تغيير الأسماء.
 OPEN_STATES = (STATE_PRICE_QUOTED, STATE_DECLINED, STATE_LEGACY_UNKNOWN)
+
+# الحدث المقابل للحالة التي يكتبها مسار السقوط الآمن save_lead. حالة
+# خارج هذا الجدول (legacy_unknown أو قيمة من مستدعٍ خارجي) تُنتج
+# LEAD_CREATED وحده: صف أُنشئ فعلاً، وحالته لا تُترجم إلى انتقال في
+# §6 - وتخمين انتقال لها يكتب ادّعاءً في السجل الذي سنقيس عليه.
+_STATE_TO_EVENT = {
+    STATE_PRICE_QUOTED: events.PRICE_QUOTED,
+    STATE_DECLINED: events.DECLINED,
+    STATE_BOOKING_REQUESTED: events.BOOKING_REQUESTED,
+}
 
 # قيم عمود "نتيجة المتابعة" = الإسناد (PRD §9.1) + الانتهاء (§7).
 OUTCOME_PENDING = ""
@@ -507,6 +519,27 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
         }
         rows.append(new_row)
         _write_all_rows_unlocked(rows)
+
+        # الإصدار بعد نجاح كتابة الصف وحده: كتابة فاشلة ترمي قبل هنا
+        # فلا يُسجَّل انتقال لم يقع. مسار السقوط الآمن هذا يُنتج نفس
+        # أحداث المسار الأساسي، فلا يختفي حجزٌ من القمع لأنه مرّ من هنا.
+        base_payload = {
+            "user_id": user_id,
+            "service_name": service_name,
+            "price": new_row["سعر الخدمة وقت الإنشاء"],
+        }
+        events.emit(events.LEAD_CREATED, lead_id=lead_id, channel=channel,
+                    payload={**base_payload, "source": "save_lead"})
+        state_event = _STATE_TO_EVENT.get(status)
+        if state_event:
+            events.emit(state_event, lead_id=lead_id, channel=channel,
+                        payload={
+                            **base_payload,
+                            "followup_stage": new_row["مرحلة المتابعة"],
+                            "outcome": new_row["نتيجة المتابعة"],
+                            "contact_info_present": bool(contact_info),
+                            "source": "save_lead",
+                        })
         return lead_id
 
 
@@ -557,10 +590,21 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
                 and row.get("الخدمة المطلوبة") == service_name
                 and _is_open_lead(row)
             ):
+                # سُعِّرت مرة أخرى على نفس الـLead: PRICE_QUOTED يقع
+                # فعلاً (الرد يحمل السعر)، وLEAD_CREATED لا يقع - لم
+                # يُنشأ صف. هذا هو الموضع الوحيد في النظام الذي يعرف
+                # الفرق، ولهذا يعيش الإصدار هنا لا في business_logic.
+                events.emit(events.PRICE_QUOTED, lead_id=existing_id, channel=channel,
+                            payload={
+                                "user_id": user_id,
+                                "service_name": service_name,
+                                "price": row.get("سعر الخدمة وقت الإنشاء", ""),
+                                "lead_created": False,
+                            })
                 return existing_id
 
         lead_id = _new_lead_id()
-        rows.append({
+        new_row = {
             LEAD_ID_COLUMN: lead_id,
             "التاريخ والوقت": datetime.now().strftime(TIMESTAMP_FORMAT),
             "معرف العميل": user_id,
@@ -575,8 +619,22 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
             "مرحلة المتابعة": "0",
             "تاريخ آخر متابعة": "",
             "نتيجة المتابعة": "",
-        })
+        }
+        rows.append(new_row)
         _write_all_rows_unlocked(rows)
+
+        # حدثان في نفس اللحظة، وهما مختلفان قصداً (§6): D1 يجعل
+        # الإنشاء والتسعير متزامنين اليوم، وهما ينفصلان في التغيير #6
+        # حين يُنشأ Lead عند سؤال الاستيضاح قبل أي سعر.
+        quote_payload = {
+            "user_id": user_id,
+            "service_name": service_name,
+            "price": new_row["سعر الخدمة وقت الإنشاء"],
+        }
+        events.emit(events.LEAD_CREATED, lead_id=lead_id, channel=channel,
+                    payload={**quote_payload, "source": "price_quote"})
+        events.emit(events.PRICE_QUOTED, lead_id=lead_id, channel=channel,
+                    payload={**quote_payload, "lead_created": True})
         return lead_id
 
 
@@ -611,6 +669,18 @@ def record_booking_request(lead_id: str, contact_info: str) -> bool:
                 row[STATUS_REASON_COLUMN] = REASON_BOOKING_REQUESTED
                 row["بيانات التواصل"] = contact_info
                 _write_all_rows_unlocked(rows)
+                # بيانات التواصل نفسها لا تدخل الحدث - وجودها فقط.
+                events.emit(events.BOOKING_REQUESTED, lead_id=lead_id,
+                            channel=row.get("القناة", ""),
+                            payload={
+                                "user_id": row.get("معرف العميل", ""),
+                                "service_name": row.get("الخدمة المطلوبة", ""),
+                                "price": row.get("سعر الخدمة وقت الإنشاء", ""),
+                                "followup_stage": row.get("مرحلة المتابعة", "0"),
+                                "outcome": row.get("نتيجة المتابعة", ""),
+                                "contact_info_present": bool(contact_info),
+                                "source": "record_booking_request",
+                            })
                 return True
         return False
 
@@ -652,10 +722,24 @@ def record_decline(lead_id: str) -> bool:
         rows = _read_all_rows_unlocked()
         for row in rows:
             if row.get(LEAD_ID_COLUMN) == lead_id:
-                if row.get("الحالة") != STATE_BOOKING_REQUESTED:
+                became_declined = row.get("الحالة") != STATE_BOOKING_REQUESTED
+                if became_declined:
                     row["الحالة"] = STATE_DECLINED
                 row[STATUS_REASON_COLUMN] = REASON_DECLINED
                 _write_all_rows_unlocked(rows)
+                # الحارس أعلاه يحمي صفاً بلغ booking_requested من فقد
+                # حالته؛ عندها لم يقع انتقال في دورة الحياة - تغيّر
+                # status_reason وحده - فلا يُصدَر DECLINED عن لا شيء.
+                if became_declined:
+                    events.emit(events.DECLINED, lead_id=lead_id,
+                                channel=row.get("القناة", ""),
+                                payload={
+                                    "user_id": row.get("معرف العميل", ""),
+                                    "service_name": row.get("الخدمة المطلوبة", ""),
+                                    "price": row.get("سعر الخدمة وقت الإنشاء", ""),
+                                    "followup_stage": row.get("مرحلة المتابعة", "0"),
+                                    "source": "record_decline",
+                                })
                 return True
         return False
 
@@ -760,13 +844,60 @@ def mark_followup_sent(lead_id: str, new_stage: str) -> bool:
                 row["مرحلة المتابعة"] = new_stage
                 row["تاريخ آخر متابعة"] = datetime.now().strftime(TIMESTAMP_FORMAT)
                 _write_all_rows_unlocked(rows)
+                # send_followups.py لا يستدعي هذه الدالة إلا بعد نجاح
+                # channel.send_message، فالحدث يعني "رسالة غادرت فعلاً"
+                # لا "حاولنا". محاولة فاشلة ثم إعادة محاولة ناجحة تُنتج
+                # حدثاً واحداً بالضبط، لا حدثين ولا صفراً.
+                events.emit(events.FOLLOWUP_SENT, lead_id=lead_id,
+                            channel=row.get("القناة", ""),
+                            payload={
+                                "user_id": row.get("معرف العميل", ""),
+                                "service_name": row.get("الخدمة المطلوبة", ""),
+                                "stage": new_stage,
+                            })
                 return True
         return False
 
 
 def mark_expired(lead_id: str) -> bool:
-    """يُعلّم صف Lead واحداً كـ"منتهي". المخاطبة بـlead_id وحده - كما في mark_followup_sent."""
-    return _update_lead_row(lead_id, {"نتيجة المتابعة": OUTCOME_EXPIRED})
+    """
+    يُعلّم صف Lead واحداً كـ"منتهي". المخاطبة بـlead_id وحده - كما في
+    mark_followup_sent.
+
+    ما يُكتب لم يتغيّر بحرف واحد عن _update_lead_row: نفس الحقل بنفس
+    القيمة بلا شرط. الحلقة مكتوبة صراحةً هنا لأن الحدث يحتاج القناة
+    والخدمة من الصف نفسه، و_update_lead_row لا تُرجع الصف.
+
+    LEAD_EXPIRED اسم خارج قائمة §6 - إضافة موثّقة بقرار صريح: §7
+    يجعل EXPIRED حالة حقيقية في دورة الحياة و§6 لا يحمل اسماً لها،
+    وبلا الحدث لا يستطيع تقرير مشتق من الأحداث وحدها التمييز بين
+    Lead منتهٍ وLead ما زال مفتوحاً.
+
+    الإصدار مشروط بأن القيمة السابقة لم تكن "منتهي" أصلاً: استدعاء
+    ثانٍ على نفس الصف يكتب نفس القيمة كما كان يفعل تماماً، ولا يضيف
+    انتهاءً ثانياً لم يقع.
+    """
+    if not lead_id:
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if row.get(LEAD_ID_COLUMN) == lead_id:
+                already_expired = row.get("نتيجة المتابعة", "") == OUTCOME_EXPIRED
+                row["نتيجة المتابعة"] = OUTCOME_EXPIRED
+                _write_all_rows_unlocked(rows)
+                if not already_expired:
+                    events.emit(events.LEAD_EXPIRED, lead_id=lead_id,
+                                channel=row.get("القناة", ""),
+                                payload={
+                                    "user_id": row.get("معرف العميل", ""),
+                                    "service_name": row.get("الخدمة المطلوبة", ""),
+                                    "price": row.get("سعر الخدمة وقت الإنشاء", ""),
+                                    "followup_stage": row.get("مرحلة المتابعة", "0"),
+                                })
+                return True
+        return False
 
 
 def is_unbooked(row: dict, now: datetime | None = None,

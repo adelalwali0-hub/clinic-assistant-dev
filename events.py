@@ -1,0 +1,159 @@
+"""
+سجل الأحداث بالإلحاق فقط - events.jsonl (PRD §6، D3)
+========================================================================
+كائن JSON واحد لكل سطر، UTF-8، `ensure_ascii=False` فالعربية تُكتب
+عربية على القرص لا `\\uXXXX`. لا تعديل ولا حذف ولا إعادة كتابة: كل
+كتابة إلحاق في نهاية الملف، وهذا هو كامل عقد هذا الملف.
+
+هذا السجل **لا يستبدل leads.csv** في هذا التغيير. الصف يُكتب كما كان
+حرفياً، والحدث يُلحَق بجانبه. تحوّل leads.csv إلى "عرض مشتق" (§6)
+خطوة لاحقة لا تحدث هنا.
+
+[لا يكسر المُستدعي أبداً]
+`emit()` لا ترمي أي استثناء مهما حدث - لا قرص ممتلئ ولا صلاحية
+مرفوضة ولا ملف مقفل. تلتقط كل شيء، تطبع سطر `[EVENT-FAIL]` على
+**stderr**، وتُرجع False. السبب: الحدث سجلٌّ عن فعل تجاري وقع
+بالفعل. إسقاط حجز عميلة لأن سطر سجل لم يُكتب يجعل طبقة القياس
+تُتلف ما جاءت لتقيسه.
+
+الاتجاه المختار عند الفشل مقصود: `leads.csv` قد يسبق `events.jsonl`،
+ولا يسبقه العكس أبداً (الإصدار يقع **بعد** نجاح كتابة الصف وحدها).
+سجل ناقص يمكن ترميمه من `leads.csv`؛ سجل يدّعي انتقالاً لم يقع كذبة
+لا يكشفها شيء لاحقاً. والفشل مرئي على stderr، لا صامت.
+
+[أسماء الأحداث]
+الأسماء الستة أدناه هي أسماء §6 حرفياً، ما عدا `LEAD_EXPIRED`:
+§6 لا يحمل اسماً لانتهاء الـLead بينما §7 يجعل EXPIRED حالة حقيقية
+في دورة الحياة، و`mark_expired` كتابة فعلية في الكود اليوم. بلا هذا
+الاسم لا يستطيع تقرير مشتق من الأحداث وحدها التمييز بين Lead منتهٍ
+وLead ما زال مفتوحاً - وهو شرط خروج Gate A نفسه. الاسم إضافة موثّقة
+على §6 بقرار صريح، لا تخمين.
+
+أنواع §6 غير المُصدَرة بعد ولماذا (لا تُخترع لها مواضع):
+  RESPONSE_SENT      - يحتاج lead_id في مسار الإرسال وvariant_id
+                       (التغيير #5). حدث بلا lead_id لا يُربط لاحقاً.
+  AMBIGUITY_ASKED    - كشف الغموض غير موجود في الكود (التغيير #6).
+  MARKED_UNBOOKED    - `unbooked` تُشتق عند القراءة (is_unbooked) ولا
+                       تُكتب أبداً؛ لا لحظة انتقال لتعليقه عليها.
+                       يُشتق من الأحداث: PRICE_QUOTED بلا
+                       BOOKING_REQUESTED خلال نافذة الصمت (§8 حرفياً).
+  HOLDOUT_ASSIGNED   - لا holdout_flag في النظام إطلاقاً.
+  BOOKING_CONFIRMED / BOOKING_COMPLETED / NO_SHOW
+                     - §7: كل انتقال بعد REQUESTED مصدره بشري حصراً،
+                       ولا مسار إدخال بشري في النظام (Gate B).
+  AUTOMATION_PAUSED  - لا آلية إيقاف أتمتة (S6).
+
+[الخصوصية]
+`payload` لا يحمل `بيانات التواصل` (اسم + رقم هاتف) إطلاقاً. لا سبب
+لنسخ رقم العميلة إلى ملف ثانٍ؛ `contact_info_present` تكفي لكل تحليل
+لاحق. الملف مع ذلك مُستثنى في .gitignore لأنه يحمل `user_id` - وهو
+معرّف قناة يقود إلى شخص.
+"""
+
+import json
+import sys
+import uuid
+from datetime import datetime
+
+EVENTS_FILE = "events.jsonl"
+
+EVENT_ID_PREFIX = "ev_"
+
+# --------------------------------------------------------- أنواع الأحداث
+LEAD_CREATED = "LEAD_CREATED"
+PRICE_QUOTED = "PRICE_QUOTED"
+BOOKING_REQUESTED = "BOOKING_REQUESTED"
+DECLINED = "DECLINED"
+FOLLOWUP_SENT = "FOLLOWUP_SENT"
+
+# تعديل موثّق على §6 - انظر ترويسة الملف.
+LEAD_EXPIRED = "LEAD_EXPIRED"
+
+# ترتيب المفاتيح ثابت في كل سطر: يجعل الملف قابلاً للقراءة بالعين
+# وللفرق (diff) بلا ضجيج ترتيب.
+EVENT_KEYS = ("event_id", "event_type", "lead_id", "channel",
+              "timestamp", "variant_id", "payload")
+
+
+def _new_event_id() -> str:
+    """
+    معرّف حدث فريد. عشوائي (uuid4) لا مشتق من محتوى الحدث: حدثان
+    متطابقان في كل حقولهما وواقعان في نفس الميكروثانية يبقيان حدثين.
+    نفس منطق _new_lead_id في leads_store.
+    """
+    return EVENT_ID_PREFIX + uuid.uuid4().hex
+
+
+def _now_iso() -> str:
+    """
+    طابع زمني محلي بلا منطقة زمنية، بدقة الميكروثانية.
+
+    بلا منطقة زمنية: نفس اصطلاح TIMESTAMP_FORMAT في leads_store -
+    اصطلاحان للوقت في مستودع واحد أسوأ من اصطلاح واحد ناقص.
+
+    بدقة الميكروثانية: LEAD_CREATED وPRICE_QUOTED يقعان في نفس
+    الثانية، وترتيبهما يجب أن يكون قاطعاً. عند تساوي الطوابع (ساعة
+    مجمّدة في اختبار) يبقى ترتيب الأسطر في الملف هو الحكم.
+    """
+    return datetime.now().isoformat(timespec="microseconds")
+
+
+def emit(event_type: str, lead_id: str, channel: str,
+         variant_id: str | None = None, payload: dict | None = None) -> bool:
+    """
+    يُلحق حدثاً واحداً بـevents.jsonl. يُرجع True عند الكتابة، False
+    عند أي فشل - ولا يرمي استثناءً أبداً.
+
+    variant_id يبقى None في هذا التغيير (التغيير #5 هو الذي يمرّره
+    عبر OutgoingMessage). المفتاح موجود في كل سطر منذ الآن لئلا
+    تنقسم بنية الملف إلى ما قبل وما بعد.
+
+    تُستدعى من دوال الكتابة في leads_store **بعد** نجاح كتابة الصف
+    وداخل نفس القفل، فترتيب الأسطر هنا يطابق ترتيب الكتابات هناك حتى
+    بين عمليتين متوازيتين.
+    """
+    try:
+        record = {
+            "event_id": _new_event_id(),
+            "event_type": event_type,
+            "lead_id": lead_id,
+            "channel": channel,
+            "timestamp": _now_iso(),
+            "variant_id": variant_id,
+            "payload": payload if payload is not None else {},
+        }
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        # سطر واحد قصير في وضع الإلحاق: كتابة واحدة، بلا قراءة سابقة،
+        # وبلا أي مسار يمكنه اقتطاع الملف.
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+        return True
+    except Exception as e:
+        # مرئي لا صامت - وعلى stderr لا stdout: مجرى التشخيص لا مجرى
+        # سجلات التشغيل العادية.
+        print(f"[EVENT-FAIL] {event_type} lead_id={lead_id}: {e}", file=sys.stderr)
+        return False
+
+
+def read_all() -> list[dict]:
+    """
+    قراءة السجل كاملاً بترتيب الإلحاق. أداة قراءة فقط للتقارير
+    والاختبارات - لا يستدعيها أي مسار كتابة.
+
+    سطر تالف (كتابة انقطعت وسط انهيار) يُتخطّى ولا يُسقط الملف كله:
+    الأحداث السليمة قبله وبعده تبقى مقروءة.
+    """
+    events: list[dict] = []
+    try:
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        return []
+    return events

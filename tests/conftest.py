@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # جذر المشروع في sys.path حتى يعمل `import leads_store` من داخل tests/
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import events  # noqa: E402
 import leads_store  # noqa: E402
 from storage import session_store  # noqa: E402
 
@@ -43,6 +44,22 @@ def isolated_leads_file(tmp_path, monkeypatch):
         leads_store, "BACKUP_FILE_STATUS_VOCABULARY", str(leads_file) + ".backup-pre-status-vocabulary"
     )
     return leads_file
+
+
+@pytest.fixture(autouse=True)
+def isolated_events_file(tmp_path, monkeypatch):
+    """
+    يوجّه سجل الأحداث إلى tmp_path كذلك.
+
+    autouse لنفس سبب العزلين الآخرين، وبإلحاح أكبر: events.jsonl ملف
+    بالإلحاق فقط لا يُقتطع أبداً، فاختبار واحد ينسى العزل يُلوّث السجل
+    الحقيقي بأحداث مختلَقة ولا مسار لسحبها بعدها.
+
+    كل اختبار يبدأ بملف غير موجود - وهذه حالة صحيحة تتعامل معها
+    events.read_all بإرجاع قائمة فارغة.
+    """
+    monkeypatch.setattr(events, "EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    return tmp_path / "events.jsonl"
 
 
 @pytest.fixture(autouse=True)

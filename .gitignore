@@ -16,6 +16,9 @@ env/
 # Sensitive data
 leads.csv
 leads.csv.*
+# سجل الأحداث: يحمل user_id لكل قناة - معرّف يقود إلى شخص
+events.jsonl
+events.jsonl.*
 
 # Local files
 *.log
