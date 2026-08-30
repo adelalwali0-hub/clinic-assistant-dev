@@ -7,6 +7,7 @@
 الاختبارات إطلاقاً.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -83,3 +84,81 @@ def isolated_sessions_file(tmp_path, monkeypatch):
         str(data_dir / "sessions.json") + ".backup-pre-status-vocabulary",
     )
     return data_dir / "sessions.json"
+
+
+# ------------------------------------------------- حارس العزل (بعد كل اختبار)
+
+#: كل مسار بيانات تكتبه المنظومة. الفكسترات الثلاث أعلاه توجّهها كلها إلى
+#: tmp_path، والحارس أدناه يتحقق أنها بقيت هناك حتى نهاية الاختبار.
+_ISOLATED_PATHS = (
+    (leads_store, "LEADS_FILE"),
+    (leads_store, "LOCK_FILE"),
+    (leads_store, "BACKUP_FILE"),
+    (leads_store, "BACKUP_FILE_PRICE_QUOTE"),
+    (leads_store, "BACKUP_FILE_STATUS_VOCABULARY"),
+    (session_store, "DATA_DIR"),
+    (session_store, "SESSIONS_FILE"),
+    (session_store, "BACKUP_FILE_STATUS_VOCABULARY"),
+    (events, "EVENTS_FILE"),
+)
+
+
+def _escape_reason(value, tmp_root):
+    """
+    يصف كيف خرج المسار من tmp_path، أو None إن كان بداخلها.
+
+    المسار النسبي خروج بحد ذاته: يُحلّ مقابل مجلد العمل - أي جذر
+    المشروع - فيصيب الملف الحقيقي.
+    """
+    if not isinstance(value, (str, os.PathLike)):
+        return f"ليس مساراً: {value!r}"
+    path = Path(value)
+    if not path.is_absolute():
+        return f"مسار نسبي {str(value)!r} ← {Path.cwd() / path}"
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(tmp_root)
+    except ValueError:
+        return f"{str(value)!r} ← {resolved}"
+    return None
+
+
+def _assert_paths_inside(tmp_root):
+    """يجمع كل الهاربين ويفشل مرة واحدة مسمّياً كلاً منهم."""
+    escapes = [
+        f"  {module.__name__}.{attr} = {reason}"
+        for module, attr in _ISOLATED_PATHS
+        if (reason := _escape_reason(getattr(module, attr, None), tmp_root)) is not None
+    ]
+    # الـchdir يعود مع الـundo كذلك، ومجلد العمل هو ما يجعل المسار النسبي خطراً.
+    if Path.cwd() != PROJECT_ROOT:
+        escapes.append(f"  مجلد العمل = {Path.cwd()} (المتوقع {PROJECT_ROOT})")
+
+    assert not escapes, (
+        "انكسر عزل الاختبارات: خرجت مسارات من tmp_path إلى البيانات الحية.\n"
+        + "\n".join(escapes)
+        + f"\n  tmp_path = {tmp_root}"
+    )
+
+
+# السبب حادثة حقيقية: اختبار نادى monkeypatch.undo() في وسطه. pytest يشارك
+# نسخة monkeypatch واحدة مع الفكسترات أعلاه، فالـundo أعاد LEADS_FILE
+# وSESSIONS_FILE وEVENTS_FILE والـchdir إلى الحقيقي. بقية الاختبار صارت تشير
+# إلى leads.csv وdata/sessions.json الحيَّين. نجا الملف الحقيقي بالصدفة وحدها:
+# الاختبار فشل عند assert قبل أن يبلغ أي كتابة. هذا الحارس يجعل الخطأ
+# مستحيلاً بدل أن يكون محظوظاً.
+#
+# الفكسترات الثلاث تُطلب كوسائط لا لقيمها بل لترتيب الهدم: طلب فكسترة يضمن
+# تهيئتها قبلنا، وpytest يهدم بترتيب معكوس - فنُهدَم نحن أولاً، قبل أن يُرجع
+# monkeypatch المسارات الحقيقية. الاعتماد على ترتيب التعريف في الملف كان
+# سيجعل الحارس نفسه هشّاً.
+#
+# لا باب خلفي: ما من اختبار يحتاج مساراً خارج tmp_path. والشرح هنا لا في
+# docstring عمداً - pytest يطبع جسم الفكسترة عند الفشل، فتُدفن الرسالة تحته.
+@pytest.fixture(autouse=True)
+def paths_never_escape_tmp_path(
+    tmp_path, isolated_leads_file, isolated_events_file, isolated_sessions_file
+):
+    """بعد كل اختبار: كل مسارات البيانات ما زالت داخل tmp_path."""
+    yield
+    _assert_paths_inside(tmp_path.resolve())
