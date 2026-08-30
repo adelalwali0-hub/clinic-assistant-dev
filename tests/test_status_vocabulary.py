@@ -360,7 +360,7 @@ def test_live_session_with_legacy_state_is_read_and_does_not_requote(isolated_se
 
     assert session_store.get_session("900")["state"] == session_store.STATE_AWAITING_BOOKING_REPLY
 
-    reply = handle_message(make_message("900", "نعم"))
+    reply = handle_message(make_message("900", "نعم")).text
 
     assert "اسمك ورقم هاتفك" in reply
     assert session_store.get_session("900")["state"] == session_store.STATE_AWAITING_CONTACT_INFO

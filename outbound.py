@@ -1,0 +1,105 @@
+"""
+مسار الإرسال الموحّد - Outbound (PRD D3، F5)
+========================================================================
+كل رسالة تغادر النظام تمر من `send()` هنا. قبل هذا الملف كان هناك
+مساران مستقلان: MessageRouter للردود الحية، وsend_followups.py يتجاوز
+الموجّه كلياً ويستدعي `channel.send_message` مباشرة. كل قاعدة تخص
+الصادر كان يجب أن تُكتب مرتين، ولم يكن أي صادر قابلاً للربط بنتيجته.
+
+[ما تملكه هذه الدالة]
+  - استدعاء القناة وعزل فشلها (استثناء الشبكة لا يصعد للمُستدعي)
+  - سطر السجل الطرفي الموحّد ([OUT] / [OUT-FAIL])
+  - التحقق من وجود صياغة مسجّلة ([VARIANT-MISSING])
+  - إصدار حدث الرسالة الصادرة - **عند النجاح وحده**
+
+[لماذا عند النجاح وحده]
+حدث يقول "أُرسلت رسالة" بينما لم تُرسل كذبةٌ لا يكشفها شيء لاحقاً،
+وهي بالضبط ما تمنعه ترويسة events.py. الإرسال الفاشل يطبع [OUT-FAIL]
+ولا يكتب شيئاً؛ ومسار المتابعة يعيد المحاولة لاحقاً كما كان يفعل
+حرفياً، فتُنتج المحاولة الناجحة حدثاً واحداً بالضبط.
+
+[event_type=None: من يملك الحدث]
+الافتراضي RESPONSE_SENT - وهو الصحيح لكل رد حي.
+
+مسار المتابعة يمرّر None لأن حدثه (FOLLOWUP_SENT) يجب أن يُكتب داخل
+`mark_followup_sent` تحت قفل leads.csv، مباشرة بعد نجاح كتابة الصف:
+لو أصدرناه هنا لَوقع الحدث حتى لو فشلت كتابة الصف بعده، فينفصل
+"متابعة أُرسلت" في السجل عن "متابعة مُعلَّمة" في الملف - وهو الانفصال
+الذي يُنتج إعادة إرسال أبدية بلا أثر يفسّرها.
+
+الرسالة الواحدة تُنتج حدثاً واحداً في الحالتين. النوعان أخوان بمعنى
+واحد (رسالة غادرت فعلاً) ويفترقان في المسار - انظر events.py.
+
+[لماذا لا يعبر lead_id إلى القناة]
+`lead_id` معامل مستقل هنا ولا يدخل OutgoingMessage. D3 يضع `variant_id`
+في الرسالة الصادرة ولا يضع هوية الـLead؛ والقناة يجب ألا ترى أي
+معرّف تجاري داخلي. المُرسَل فعلاً إلى Telegram هو `user_id` و`text`
+فقط، تماماً كما كان.
+"""
+
+import sys
+
+import events
+import variants
+from channel_interface import MessagingChannel, OutgoingMessage
+
+
+def send(
+    channel: MessagingChannel,
+    message: OutgoingMessage,
+    lead_id: str | None = None,
+    event_type: str | None = events.RESPONSE_SENT,
+) -> bool:
+    """
+    يرسل رسالة صادرة واحدة ويسجّلها. يُرجع True عند مغادرة الرسالة
+    فعلاً، False عند أي فشل - ولا يرمي استثناءً أبداً.
+
+    lead_id=None (أو "") حالة مشروعة: رسالة أُرسلت قبل وجود أي Lead
+    (رد الترحيب بقائمة الخدمات، ورد الخطأ). تُكتب "" في الحدث - أصدق
+    من اختلاق معرّف، والحدث يبقى محسوباً ضمن الصادر.
+    """
+    if message.variant_id is None:
+        # مرئي لا صامت: رسالة بلا صياغة مسجّلة تخرج فعلاً (إسقاط رسالة
+        # عميلة لثغرة محاسبية أسوأ من ثغرة محاسبية)، لكنها لا تمرّ
+        # بهدوء. لا مسار إنتاجي اليوم يصل إلى هنا.
+        print(
+            f"[VARIANT-MISSING] رسالة صادرة بلا variant_id -> {message.user_id}",
+            file=sys.stderr,
+        )
+
+    try:
+        success = channel.send_message(message)
+    except Exception as e:
+        print(f"[OUT-FAIL] -> {message.user_id}: فشل الإرسال: {e}")
+        return False
+
+    if not success:
+        print(f"[OUT-FAIL] -> {message.user_id}: {message.text}")
+        return False
+
+    print(f"[OUT] -> {message.user_id}: {message.text} ({message.variant_id})")
+
+    if event_type is not None:
+        events.emit(
+            event_type,
+            lead_id=lead_id or "",
+            channel=channel.channel_name,
+            variant_id=message.variant_id,
+            payload=message_payload(message),
+        )
+
+    return True
+
+
+def message_payload(message: OutgoingMessage) -> dict:
+    """
+    حمولة حدث رسالة صادرة. نص الرسالة نفسه **لا يُنسَخ** إلى السجل:
+    `variant_id` يقود إلى النص في variants.py، ونسخ القالب في كل سطر
+    يضخّم ملفاً بالإلحاق فقط بلا فائدة. `variant_hash` بصمة القالب -
+    تكشف تعديلاً صامتاً على صياغة مستعمَلة (انظر ترويسة variants.py).
+    """
+    return {
+        "user_id": message.user_id,
+        "intent": variants.intent_of(message.variant_id),
+        "variant_hash": variants.template_hash(message.variant_id),
+    }

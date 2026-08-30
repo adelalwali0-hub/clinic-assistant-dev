@@ -33,6 +33,32 @@ class OutgoingMessage:
     user_id: str
     text: str
     quick_replies: Optional[List[str]] = None  # أزرار سريعة اختيارية (تدعمها أغلب القنوات)
+    # [PRD D3] معرّف الصياغة المعتمدة التي أنتجت `text` (variants.py).
+    # القناة لا تقرأه ولا ترسله - هو للسجل وحده، ليُربط كل صادر بنتيجته.
+    # None ممكن تقنياً (رسالة بلا صياغة مسجّلة) ولا يمنع الإرسال، لكنه
+    # يُنتج تحذيراً مرئياً في outbound.py - انظر [VARIANT-MISSING] هناك.
+    variant_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ReplyDecision:
+    """
+    جواب طبقة منطق العمل على رسالة واردة: العقد بين `handler`
+    وMessageRouter.
+
+    يعيش هنا بجوار IncomingMessage/OutgoingMessage لأنه ثالث عقود
+    الرسائل، وليجد Router نوعه دون أن يستورد business_logic - فيبقى
+    الموجّه مستقلاً عن أي منطق أعمال بعينه كما كان.
+
+    `lead_id` حاضر لأن مسار الإرسال يحتاجه لنسب الرسالة الصادرة إلى
+    الـLead الذي أنتجها. لا يعبر إلى القناة إطلاقاً: الذي يُسلَّم
+    للقناة هو OutgoingMessage وحده، وهو لا يحمله. None حين لا Lead
+    بعد (رسالة ترحيب قبل أي استفسار سعر، أو رد خطأ).
+    """
+    text: str
+    variant_id: Optional[str]
+    lead_id: Optional[str]
+    rule_decision: str
 
 
 class MessagingChannel(ABC):

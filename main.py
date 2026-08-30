@@ -16,8 +16,9 @@ Rollback فوري: إعادة USE_AI_INTENT إلى false يعيد النظام �
 
 import os
 from telegram_channel import TelegramChannel
+from channel_interface import ReplyDecision
 from message_router import MessageRouter
-from business_logic import handle_message, get_session_state, get_last_rule_decision
+from business_logic import handle_message, get_session_state
 from ai_understanding import understand_message
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -34,18 +35,22 @@ USE_AI_INTENT = os.environ.get("USE_AI_INTENT", "false").strip().lower() == "tru
 print(f"[CONFIG] USE_AI_INTENT={USE_AI_INTENT}")
 
 
-def combined_handler(message) -> str:
+def combined_handler(message) -> ReplyDecision:
     """
     إذا USE_AI_INTENT=false: لا يُستدعى understand_message() إطلاقاً -
     صفر اتصال بـOpenAI، Rule-Based بالكامل فوراً.
     إذا USE_AI_INTENT=true: نفس سلوك Phase 3B حرفياً - استدعاء واحد
     لـGPT لكل رسالة، يُستخدم للتجاوز الآمن المحدود وللمقارنة معاً.
+
+    [التغيير #5] تمرّر ReplyDecision كما هي إلى الموجّه: هي التي تحمل
+    variant_id وlead_id إلى مسار الإرسال. `rule_decision` تُقرأ منها
+    مباشرة بدل get_last_rule_decision - القيمة نفسها من موضعها لا من
+    قاموس عام.
     """
     if not USE_AI_INTENT:
-        reply_text = handle_message(message, ai_intent=None)
-        rule_decision = get_last_rule_decision(message.user_id)
-        print(f"[COMPARE] rule_action={rule_decision} | ai_intent=skipped (USE_AI_INTENT=false) | match=N/A")
-        return reply_text
+        decision = handle_message(message, ai_intent=None)
+        print(f"[COMPARE] rule_action={decision.rule_decision} | ai_intent=skipped (USE_AI_INTENT=false) | match=N/A")
+        return decision
 
     session_state = get_session_state(message.user_id)
     ai_result = understand_message(message.text, recent_history=[], session_state=session_state)
@@ -53,13 +58,12 @@ def combined_handler(message) -> str:
 
     ai_intent_for_decision = ai_intent_raw if ai_intent_raw in AI_OVERRIDE_ALLOWED else None
 
-    reply_text = handle_message(message, ai_intent=ai_intent_for_decision)
+    decision = handle_message(message, ai_intent=ai_intent_for_decision)
 
-    rule_decision = get_last_rule_decision(message.user_id)
-    match = rule_decision == ai_intent_raw
-    print(f"[COMPARE] rule_action={rule_decision} | ai_intent={ai_intent_raw} | match={match}")
+    match = decision.rule_decision == ai_intent_raw
+    print(f"[COMPARE] rule_action={decision.rule_decision} | ai_intent={ai_intent_raw} | match={match}")
 
-    return reply_text
+    return decision
 
 
 if __name__ == "__main__":
