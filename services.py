@@ -9,13 +9,24 @@ config/clinic_config.json عند بدء التشغيل، حتى يمكن تجه�
 يتوقف البرنامج فوراً برسالة واضحة - لا fallback لبيانات افتراضية،
 ولا تشغيل ببيانات فارغة أو وهمية.
 
-find_service() وservices_list_text() لم يتغيّر منطقهما إطلاقاً -
-نفس التوقيع ونفس السلوك تماماً كما كانا قبل هذا التعديل.
+[التغيير #6 - كشف الغموض] `find_service()` غيّرت عقدها عن قصد: كانت
+تُرجع **أول** خدمة تطابق، فرسالة تذكر كلمة تشترك فيها ثلاث خدمات
+كانت تُسعَّر بسعر أولاها بترتيب الإعداد - قراراً صامتاً بلا أي أثر.
+صارت تُرجع خدمة **فقط عند التطابق الوحيد**، وNone عند صفر أو أكثر من
+واحدة. `find_services()` الجديدة تُرجع كل المطابقات، فمن يحتاج التمييز
+بين «لا شيء» و«أكثر من واحد» يملكه الآن صراحةً.
+
+المطابقة نفسها انتقلت إلى matching.py: صارت بحدود الكلمة بدل السلسلة
+الفرعية - انظر ترويسة ذلك الملف. `normalize_arabic` تعيش هناك وتُعاد
+تصديرها من هنا، فكل `from services import normalize_arabic` قائم كما
+كان.
 """
 
 import json
 import os
-import re
+
+import matching
+from matching import normalize_arabic  # noqa: F401 - إعادة تصدير: انظر الترويسة
 
 CONFIG_PATH = os.path.join("config", "clinic_config.json")
 
@@ -64,31 +75,61 @@ CENTER_NAME = _config["center_name"]
 SERVICES = _config["services"]
 
 
-def normalize_arabic(text: str) -> str:
+def find_services(text: str) -> list[dict]:
     """
-    توحيد النص العربي قبل المطابقة:
-    - إزالة "أل" التعريف من بداية كل كلمة (البشرة -> بشرة)
-    - توحيد أشكال الألف والتاء المربوطة/الهاء الشائعة
-    - إزالة المسافات الزائدة
+    كل الخدمات التي تُذكر إحدى كلماتها المفتاحية في النص، بترتيب
+    الإعداد. الترتيب هو ترتيب config/clinic_config.json حرفياً: هو
+    الترتيب الذي سيراه العميل في سؤال التوضيح، وثباته يجعل الرقم الذي
+    ترسله العميلة («2») يعني نفس الخدمة في كل مرة.
+
+    الخدمة الواحدة تظهر مرة واحدة مهما تعددت كلماتها المطابقة.
     """
-    normalized = text.strip().lower()
-    normalized = re.sub(r"[إأآا]", "ا", normalized)
-    normalized = re.sub(r"ة", "ه", normalized)
-    words = normalized.split()
-    words = [w[2:] if w.startswith("ال") and len(w) > 2 else w for w in words]
-    return " ".join(words)
+    return [
+        service for service in SERVICES
+        if matching.matches_any(text, service["keywords"])
+    ]
 
 
 def find_service(text: str):
-    """يبحث عن أول خدمة تُذكر كلماتها المفتاحية داخل نص الرسالة (بعد التوحيد)"""
-    normalized_text = normalize_arabic(text)
+    """
+    الخدمة المقصودة، أو None.
+
+    None تعني **لا خدمة واحدة مؤكَّدة**: إما لم تُذكر أي خدمة، أو
+    ذُكرت أكثر من واحدة فلا يملك هذا الملف حسم أيّها المقصودة. من
+    يحتاج التمييز بين الحالتين يستدعي find_services().
+    """
+    found = find_services(text)
+    return found[0] if len(found) == 1 else None
+
+
+def find_service_by_name(name: str):
+    """
+    الخدمة صاحبة هذا الاسم بالضبط، أو None إن لم تعد موجودة في
+    الإعداد. الجلسة تحفظ أسماء لا كائنات، وهذه هي بوابة العودة من
+    الاسم المحفوظ إلى الخدمة الحيّة بسعرها الحالي - فلو حُذفت خدمة من
+    الإعداد وسط محادثة عادت None ولم يُعرَض سعر خدمة ملغاة.
+    """
     for service in SERVICES:
-        for kw in service["keywords"]:
-            if normalize_arabic(kw) in normalized_text:
-                return service
+        if service["name"] == name:
+            return service
     return None
 
 
 def services_list_text() -> str:
     lines = [f"• {s['name']} — {s['price']}" for s in SERVICES]
     return "\n".join(lines)
+
+
+def service_options_text(service_names: list[str]) -> str:
+    """
+    قائمة الخيارات المرقّمة لسؤال التوضيح - **أسماء بلا أسعار**.
+
+    السعر غائب عمداً: سؤال التوضيح يسبق تحديد الخدمة، وعرض ثلاثة
+    أسعار فيه يجعل الرسالة رداً بالسعر عملياً - فتصير العميلة مسعَّرة
+    دون أن يُنشأ لها Lead، وهو بالضبط الفراغ الذي يغلقه هذا التغيير.
+    السعر يُعرض في price_quote.v1 وحده، بعد أن تُحسَم الخدمة.
+
+    الترقيم يبدأ من 1 ويطابق ترتيب القائمة المحفوظة في الجلسة، فرقم
+    ترسله العميلة يقود إلى نفس العنصر الذي رأته.
+    """
+    return "\n".join(f"{i}. {name}" for i, name in enumerate(service_names, 1))
