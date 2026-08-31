@@ -32,6 +32,40 @@ Booked Revenue وRevenue تُرجَعان None لا صفراً: الصفر قي�
 الممكن اليوم، إذ لا بيانات حضور في النظام ولا مسار للحصول عليها قبل
 Clinic Feedback Loop (§11).
 
+[الموافقة التسويقية ونافذة التواصل - PRD §19]
+عمودان منفصلان قصداً، لأنهما شيئان مختلفان لا يجوز خلطهما:
+
+  consent_status            : موافقة تسويقية - تُمنَح صراحةً وتبقى حتى
+                              تُسحَب. قيمها اليوم:
+                                none           : لم تُطلب ولم تُمنَح
+                                legacy_unknown : صف كُتب قبل وجود العمود
+  contact_window_opened_at  : طابع زمني للحظة التي فتحت فيها رسالتها
+                              نافذة الخدمة. ليست حالة: النافذة زمن،
+                              وحقل نصي يقول "مفتوحة" يصير كذباً بعد ساعة.
+
+الصف المكتوب اليوم يحمل `none` دائماً: عميلاتنا يبدأن التواصل ليسألن
+عن خدمة أو ليحجزن، ولم يوافقن على شيء وراء ذلك التبادل. لا مسار في
+النظام كله يطلب موافقة تسويقية (§19: لا يُبنى تدفّق موافقة الآن)،
+فأي قيمة أخرى ادّعاء. و«راسلتنا أولاً» ليست قيمة في هذا العمود
+إطلاقاً - هي بالضبط ما يحمله العمود الثاني بطابع زمني.
+
+`granted` و`withdrawn` هما الاسمان المقصودان حين يوجد مسار opt-in
+حقيقي؛ لا يُعرَّفان اليوم لأن لا شيء يكتبهما.
+
+**لا شيء يقرأ العمودين اليوم.** لا أهلية متابعة ولا توقيت ولا إرسال
+يتغيّر بسببهما. وُجِدا لأن كتابتهما بأثر رجعي مستحيلة (§19: رخيص
+الآن، مستحيل بأثر رجعي): كل يوم تشغيل يضيف صفوفاً لا سبيل لمنحها
+قيمة صادقة لاحقاً.
+
+الطابع الزمني **حدٌّ أدنى** للحظة الفتح الحقيقية: يُكتب عند إنشاء
+الصف، ويُحدَّث في المسارات التي تكتب الصف أصلاً بفعل رسالة منها
+(record_booking_request / record_decline / record_hesitation). رسالة
+واردة لا تكتب صفاً (تحية، سؤال استيضاح، إعادة سؤال البيانات، سؤال
+سعر مكرر على Lead قائم) لا تُحرّكه، فالنافذة المحسوبة منه تُغلق
+مبكراً لا متأخراً. اتجاه الخطأ مقصود وهو عكس اختيار D-019 (عمر
+الجلسة من mtime = حدّ أعلى) للسبب نفسه: يُختار الاتجاه الذي لا يسمح
+خطؤه بإرسال رسالة لا نملك حق إرسالها.
+
 [الهوية والمعرّف - PRD D3/D4]
 كل صف يحمل `lead_id` مستقراً يُولَّد مرة واحدة فقط ولا يتغير أبداً
 بعدها. كل دوال التعديل (mark_followup_sent, mark_expired) تُخاطب
@@ -58,8 +92,8 @@ Clinic Feedback Loop (§11).
 في نفس الثانية عبر save_lead يبقيان Leadين منفصلين (PRD §6).
 
 [النسخة الاحتياطية] قبل أول كتابة على leads.csv يُنسَخ الملف كما هو
-إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE وBACKUP_FILE_STATUS_VOCABULARY،
-مرة واحدة فقط لكل اسم، فيبقى لديك دائماً لقطة سليمة على القرص لكل
+إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE وBACKUP_FILE_STATUS_VOCABULARY
+وBACKUP_FILE_CONSENT، مرة واحدة فقط لكل اسم، فيبقى لديك دائماً لقطة سليمة على القرص لكل
 تغيير يمسّ دلالة الصفوف لا شكلها فقط.
 
 [حماية التزامن] كل عملية تُعدِّل الملف (save_lead, mark_followup_sent,
@@ -94,6 +128,7 @@ LOCK_FILE = LEADS_FILE + ".lock"
 BACKUP_FILE = LEADS_FILE + ".backup-pre-lead-id"
 BACKUP_FILE_PRICE_QUOTE = LEADS_FILE + ".backup-pre-price-quote-lead"
 BACKUP_FILE_STATUS_VOCABULARY = LEADS_FILE + ".backup-pre-status-vocabulary"
+BACKUP_FILE_CONSENT = LEADS_FILE + ".backup-pre-consent"
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 LEAD_ID_COLUMN = "lead_id"
@@ -158,6 +193,31 @@ REASON_DECLINED = "declined"
 REASON_HESITANT = "hesitant"
 REASON_BOOKING_REQUESTED = "booking_requested"
 
+# ------------------------------------------- الموافقة التسويقية (PRD §19)
+# حقلان تقنيان بقيم إنجليزية - كما lead_id وstatus_reason. الفصل بينهما
+# هو كامل الفكرة: الأول إذنٌ يدوم حتى يُسحَب، والثاني زمنٌ ينقضي وحده.
+CONSENT_COLUMN = "consent_status"
+
+# القيمة الوحيدة التي يكتبها أي مسار حيّ اليوم: لم نطلب موافقة تسويقية
+# قط، فلم تُمنَح. متابعتنا (رسالة لمن لم تحجز، بعد النافذة، لم تطلبها)
+# تسويقية بتصنيف Meta - و§10 يسمّيها بذلك حرفياً: «المتابعة التسويقية
+# غير المطلوبة». `none` تقول هذا بلا تجميل.
+CONSENT_NONE = "none"
+
+# صف كُتب قبل وجود العمود. ليس `none`: القيمة التي يكتبها مسار حيّ
+# تؤكّد أن الصف مرّ على كود لا يطلب موافقة لحظة كتابته، أما الصف
+# القديم فلم يُلاحَظ على هذا المحور إطلاقاً. دمجهما في رمز واحد يجعل
+# سؤال «هل رُصد هذا الصف أم افتُرض؟» غير قابل للإجابة لاحقاً - وهو
+# نفس ضرر D-016. أثرهما التشغيلي واحد: **لا إرسال تسويقي**؛
+# `legacy_unknown` لا تُقرأ «ربما وافقت» أبداً.
+CONSENT_LEGACY_UNKNOWN = "legacy_unknown"
+
+# لحظة فتح نافذة الخدمة برسالة منها - طابع زمني بصيغة TIMESTAMP_FORMAT،
+# لا حالة. "" = لا سجل (صف ما قبل العمود). ولا تُشتق من "التاريخ
+# والوقت" لصف قديم: وقت الإنشاء ≥ وقت رسالتها، فاشتقاقه يدفع انتهاء
+# النافذة إلى الأمام - أي يزعم نافذة مفتوحة بعد إغلاقها الحقيقي.
+CONTACT_WINDOW_COLUMN = "contact_window_opened_at"
+
 FIELDNAMES = [
     LEAD_ID_COLUMN,
     "التاريخ والوقت",
@@ -171,6 +231,8 @@ FIELDNAMES = [
     "مرحلة المتابعة",
     "تاريخ آخر متابعة",
     "نتيجة المتابعة",
+    CONSENT_COLUMN,
+    CONTACT_WINDOW_COLUMN,
 ]
 
 # بنية V1 القديمة (7 أعمدة). وجود عمودها المميز في ترويسة الملف هو
@@ -330,6 +392,7 @@ def _backup_once_unlocked() -> None:
         (BACKUP_FILE, "lead_id"),
         (BACKUP_FILE_PRICE_QUOTE, "إنشاء الـLead لحظة عرض السعر"),
         (BACKUP_FILE_STATUS_VOCABULARY, "مواءمة مفردات الحالة مع PRD §8"),
+        (BACKUP_FILE_CONSENT, "حقل الموافقة التسويقية ونافذة التواصل (§19)"),
     ):
         if os.path.exists(backup_path):
             continue
@@ -389,14 +452,21 @@ def _has_legacy_vocabulary(rows: list[dict]) -> bool:
 def _needs_migration(existing_fieldnames: list[str], rows: list[dict]) -> bool:
     """
     الملف بحاجة لهجرة إذا اختلفت ترويسته، أو وُجد فيه صف بلا lead_id،
-    أو حمل صف واحد مفردات ما قبل §8.
+    أو صف بـconsent_status فارغ، أو حمل صف واحد مفردات ما قبل §8.
 
     الترويسة وحدها لم تعد كافية دليلاً: هذه الهجرة تغيّر *قيماً* لا
     أعمدة، فملف بترويسة صحيحة تماماً قد يكون كله بمفردات قديمة.
+
+    consent_status الفارغ يُشعل الهجرة لأن "" ليست قيمة في مفرداته
+    إطلاقاً - هي عمود موجود لم يُملأ. أما contact_window_opened_at
+    الفارغ فقيمة نهائية مشروعة ("لا سجل للحظة الفتح")، فلا يُشعل شيئاً:
+    لو أشعلها لأُعيدت كتابة الملف عند كل قراءة بلا نهاية.
     """
     if existing_fieldnames != FIELDNAMES:
         return True
     if any(not (row.get(LEAD_ID_COLUMN) or "").strip() for row in rows):
+        return True
+    if any(not (row.get(CONSENT_COLUMN) or "").strip() for row in rows):
         return True
     return _has_legacy_vocabulary(rows)
 
@@ -409,10 +479,17 @@ def _migrate_file_if_needed_locked() -> None:
       V2 (10 أعمدة، بلا lead_id)        -> الحالية، بلا فقد أي حقل
       V3 (11 عموداً، بلا status_reason) -> الحالية، بلا فقد أي حقل
       V4 (نفس الأعمدة، مفردات ما قبل §8) -> الحالية، بإعادة تسمية القيم
+      V5 (بلا عمودي §19)                 -> الحالية، بلا فقد أي حقل
       الحالية                            -> خروج فوري، بلا أي كتابة
 
     الأعمدة المستجدة تُملأ "" لكل صف قائم: صف كُتب قبل هذا التغيير
     لا يُعرَف سبب حالته، و"" تقول ذلك بصدق بدل تخمينه.
+
+    استثناء واحد (V5): consent_status الفارغ يصير legacy_unknown، لأن
+    "" في هذا العمود تحديداً تُقرأ لاحقاً "لم يُملأ بعد" لا "لا نعرف"،
+    والفرق يظهر يوم نقيس. ولا يصير `none`: انظر تعليق الثابت أعلاه.
+    contact_window_opened_at يبقى "" - لا سجل، ولا يُشتق من وقت
+    الإنشاء لأن الاشتقاق يزعم نافذة أطول من الحقيقية.
 
     مواءمة المفردات (V4) تغيّر *قيم* عمودين فقط - "الحالة" و"نتيجة
     المتابعة" - عبر _remap_vocabulary، وبما لا يخترع تصنيفاً لصف لا
@@ -447,6 +524,7 @@ def _migrate_file_if_needed_locked() -> None:
         migrated = {field: (row.get(field) or "") for field in FIELDNAMES}
 
         migrated[LEAD_ID_COLUMN] = migrated[LEAD_ID_COLUMN].strip() or _new_lead_id()
+        migrated[CONSENT_COLUMN] = migrated[CONSENT_COLUMN].strip() or CONSENT_LEGACY_UNKNOWN
 
         if is_v1:
             migrated["مرحلة المتابعة"] = "1" if row.get(_V1_LEGACY_COLUMN) == "نعم" else "0"
@@ -511,9 +589,12 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
                     row["نتيجة المتابعة"] = _outcome_for_stage(row)
 
         lead_id = _new_lead_id()
+        # طابع واحد للعمودين: الصف يُكتب رداً على رسالة منها، فلحظة
+        # الإنشاء هي أقرب ما نملك للحظة فتح النافذة (حدّ أدنى لها).
+        created_at = datetime.now().strftime(TIMESTAMP_FORMAT)
         new_row = {
             LEAD_ID_COLUMN: lead_id,
-            "التاريخ والوقت": datetime.now().strftime(TIMESTAMP_FORMAT),
+            "التاريخ والوقت": created_at,
             "معرف العميل": user_id,
             "القناة": channel,
             "الخدمة المطلوبة": service_name,
@@ -524,6 +605,8 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
             "مرحلة المتابعة": "0",
             "تاريخ آخر متابعة": "",
             "نتيجة المتابعة": "",
+            CONSENT_COLUMN: CONSENT_NONE,
+            CONTACT_WINDOW_COLUMN: created_at,
         }
         rows.append(new_row)
         _write_all_rows_unlocked(rows)
@@ -612,9 +695,10 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
                 return existing_id
 
         lead_id = _new_lead_id()
+        created_at = datetime.now().strftime(TIMESTAMP_FORMAT)
         new_row = {
             LEAD_ID_COLUMN: lead_id,
-            "التاريخ والوقت": datetime.now().strftime(TIMESTAMP_FORMAT),
+            "التاريخ والوقت": created_at,
             "معرف العميل": user_id,
             "القناة": channel,
             "الخدمة المطلوبة": service_name,
@@ -627,6 +711,10 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
             "مرحلة المتابعة": "0",
             "تاريخ آخر متابعة": "",
             "نتيجة المتابعة": "",
+            # السعر يُعرض رداً على سؤالها، فنافذتها مفتوحة الآن. والموافقة
+            # التسويقية لم تُطلب هنا ولا في أي موضع (§19: لا تدفّق موافقة).
+            CONSENT_COLUMN: CONSENT_NONE,
+            CONTACT_WINDOW_COLUMN: created_at,
         }
         rows.append(new_row)
         _write_all_rows_unlocked(rows)
@@ -676,6 +764,10 @@ def record_booking_request(lead_id: str, contact_info: str) -> bool:
                 row["الحالة"] = STATE_BOOKING_REQUESTED
                 row[STATUS_REASON_COLUMN] = REASON_BOOKING_REQUESTED
                 row["بيانات التواصل"] = contact_info
+                # رسالتها هي التي أوصلتنا إلى هنا، فنافذة الخدمة فُتحت
+                # من جديد. الموافقة التسويقية لا تتغيّر: تسليم رقم للحجز
+                # ليس إذناً برسائل تسويقية لاحقة.
+                row[CONTACT_WINDOW_COLUMN] = datetime.now().strftime(TIMESTAMP_FORMAT)
                 _write_all_rows_unlocked(rows)
                 # بيانات التواصل نفسها لا تدخل الحدث - وجودها فقط.
                 events.emit(events.BOOKING_REQUESTED, lead_id=lead_id,
@@ -734,6 +826,8 @@ def record_decline(lead_id: str) -> bool:
                 if became_declined:
                     row["الحالة"] = STATE_DECLINED
                 row[STATUS_REASON_COLUMN] = REASON_DECLINED
+                # رفضها رسالة منها كذلك: النافذة تُفتح برسالة، لا برضا.
+                row[CONTACT_WINDOW_COLUMN] = datetime.now().strftime(TIMESTAMP_FORMAT)
                 _write_all_rows_unlocked(rows)
                 # الحارس أعلاه يحمي صفاً بلغ booking_requested من فقد
                 # حالته؛ عندها لم يقع انتقال في دورة الحياة - تغيّر
@@ -759,8 +853,14 @@ def record_hesitation(lead_id: str) -> bool:
     `hesitant` ليست حالة في §7 ولا مصطلحاً في §8 - هي نيّة في شجرة
     القرار (D-006/D-007). الـLead يبقى `price_quoted`: لم تُجب بعد،
     وهذا بالضبط ما تقوله الحالة.
+
+    ترددها رسالة منها، فطابع فتح النافذة يُحدَّث - وهو كل ما يُحدَّث
+    من عمودي §19 هنا.
     """
-    return _update_lead_row(lead_id, {STATUS_REASON_COLUMN: REASON_HESITANT})
+    return _update_lead_row(lead_id, {
+        STATUS_REASON_COLUMN: REASON_HESITANT,
+        CONTACT_WINDOW_COLUMN: datetime.now().strftime(TIMESTAMP_FORMAT),
+    })
 
 
 def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDOW_HOURS) -> list[dict]:

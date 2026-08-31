@@ -186,7 +186,12 @@ def test_migration_leaves_unrecognised_values_verbatim(isolated_leads_file):
 
 
 def test_migration_preserves_every_other_field(isolated_leads_file):
-    """الهجرة تغيّر عمودين فقط. كل حقل آخر يمرّ حرفياً."""
+    """
+    مواءمة المفردات تغيّر عمودي §8 وحدهما. كل حقل آخر يمرّ حرفياً.
+
+    عمودا §19 مستثنيان لأن `legacy_row` لا يكتبهما أصلاً - وهجرتهما
+    مختبَرة باسمها في test_consent_field.py.
+    """
     original = legacy_row("ld_g", **{
         STATUS_REASON_COLUMN: REASON_DECLINED,
         "معرف العميل": "222", "القناة": "whatsapp",
@@ -197,7 +202,8 @@ def test_migration_preserves_every_other_field(isolated_leads_file):
 
     after = read_rows()[0]
     for field in FIELDNAMES:
-        if field == "الحالة":
+        if field in ("الحالة", leads_store.CONSENT_COLUMN,
+                     leads_store.CONTACT_WINDOW_COLUMN):
             continue
         assert after[field] == original[field], f"الحقل '{field}' تغيّر أثناء الهجرة"
 
