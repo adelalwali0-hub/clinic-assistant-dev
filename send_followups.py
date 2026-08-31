@@ -23,6 +23,7 @@ FOLLOWUP_SENT، وتصير كل متابعة صادرة منسوبة إلى صي
 
 import os
 from leads_store import (
+    SILENCE_WINDOW_HOURS,
     get_leads_eligible_for_first_followup,
     get_leads_eligible_for_second_followup,
     get_leads_to_expire,
@@ -30,13 +31,19 @@ from leads_store import (
     mark_expired,
 )
 import outbound
+import settings
 import variants
 from telegram_channel import TelegramChannel
 from channel_interface import OutgoingMessage
 
-FIRST_FOLLOWUP_HOURS = 24
-SECOND_FOLLOWUP_HOURS = 72
-EXPIRE_AFTER_HOURS = 72
+# [§19] لم يعد هنا `FIRST_FOLLOWUP_HOURS`. كان ثابتاً بقيمة 24 يساوي
+# `leads_store.SILENCE_WINDOW_HOURS` بلا أن يربطهما شيء، ويُمرَّر إلى
+# دالة أهليتها الافتراضية هي النافذة نفسها - رقم واحد باسمين في ملفين.
+# الاسمان كانا يسمحان بضبط أحدهما ونسيان الآخر، فتُرسَل متابعة أولى
+# لعميلة لم تدخل حيّز الصمت بعد. الـLead يصير مؤهلاً للمتابعة في اللحظة
+# التي يُعامَل فيها صامتاً: نافذة الصمت هي العتبة، لا رقم يشبهها.
+SECOND_FOLLOWUP_HOURS = settings.SECOND_FOLLOWUP_HOURS
+EXPIRE_AFTER_HOURS = settings.EXPIRE_AFTER_HOURS
 
 FOLLOWUP_1_VARIANT = "followup_1.v1"
 FOLLOWUP_2_VARIANT = "followup_2.v1"
@@ -62,7 +69,7 @@ def build_followup_2_message(service_name: str) -> str:
 
 
 def run_first_followups(channel: TelegramChannel) -> None:
-    eligible = get_leads_eligible_for_first_followup(FIRST_FOLLOWUP_HOURS)
+    eligible = get_leads_eligible_for_first_followup(SILENCE_WINDOW_HOURS)
     if not eligible:
         print("Follow-up 1: لا توجد استفسارات مؤهلة حالياً.")
         return

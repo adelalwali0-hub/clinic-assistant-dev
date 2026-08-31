@@ -62,6 +62,11 @@ def test_the_ttl_is_named_and_equals_the_silence_window():
     المساواة قرار موثّق لا مصادفة: عند تلك الساعة يكون الـLead قد
     عُومل صامتاً ودخل دورة المتابعة، فجلسة تدّعي بعدها محادثة جارية
     تناقض سجل الـLeads.
+
+    ما تختبره هذه الدالة تغيّر معناه بعد نقل القيمتين إلى الإعداد: كانت
+    تحرس مساواة ثابتين يدويين في ملفين، وصارت تحرس **الإعداد المرفوع**
+    في المستودع. الاشتراط نفسه (TTL ≤ نافذة الصمت) صار مفروضاً عند
+    التحميل - انظر tests/test_runtime_settings.py.
     """
     assert session_store.SESSION_TTL_HOURS == 24
     assert session_store.SESSION_TTL_HOURS == leads_store.SILENCE_WINDOW_HOURS

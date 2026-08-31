@@ -46,11 +46,19 @@ SESSION_TTL_HOURS تُقرأ كجلسة افتراضية (idle) - فرسالته
 (mtime): حدٌّ **أعلى** لعمرها الحقيقي، فلا تنتهي جلسة أبكر مما
 تستحق. هذا هو نفس مبدأ D-016: لا تُسقَط عميلة وسط محادثة بسبب هجرة.
 
-SESSION_TTL_HOURS = 24 مساوية عمداً لـSILENCE_WINDOW_HOURS في
-leads_store: عند تلك الساعة يكون الـLead قد عُومل صامتاً ودخل دورة
-المتابعة، فجلسة تدّعي بعدها أن محادثة جارية تناقض سجل الـLeads.
-القيمة ثابت مسمّى واحد: إن نُقلت نافذة الصمت إلى 6-12 ساعة
-(PRD Q1، Gate C) تُنقل معها هنا بسطر واحد.
+SESSION_TTL_HOURS مربوطة بـSILENCE_WINDOW_HOURS في leads_store: عند
+تلك الساعة يكون الـLead قد عُومل صامتاً ودخل دورة المتابعة، فجلسة
+تدّعي بعدها أن محادثة جارية تناقض سجل الـLeads.
+
+كان الربط تعليقاً يحرسه انضباط بشري - رقمان في ملفين يجب أن يتحركا
+معاً - فصار مفروضاً: الافتراضي عند غياب المفتاح **هو نافذة الصمت
+نفسها** لا الرقم 24، وقيمة أكبر منها توقف الإقلاع. الاتجاه الخطر واحد
+فقط: مهلة أطول من النافذة تترك جلسة تدّعي محادثة حيّة بعد أن خرجت
+متابعة تناقضها. أقصر منها مشروع - تُعامَل رسالتها معاملة رسالة جديدة.
+
+الاشتقاق يقع في settings.py لا هنا: طبقة التخزين لا تعرف طبقة الـLeads
+(انظر أعلى الترويسة)، والإعداد يعرف الاثنين. `import settings` هنا
+استيراد ورقة بلا اعتماديات، لا اختراقاً للطبقة.
 """
 
 import json
@@ -59,14 +67,16 @@ import shutil
 import threading
 from datetime import datetime
 
+import settings
+
 DATA_DIR = "data"
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 BACKUP_FILE_STATUS_VOCABULARY = SESSIONS_FILE + ".backup-pre-status-vocabulary"
 
-# انظر الترويسة: مساوية عمداً لـleads_store.SILENCE_WINDOW_HOURS.
-# لا تُستورَد من هناك: طبقة التخزين لا تعرف طبقة الـLeads، والمساواة
-# قرار موثّق لا اعتماد برمجي.
-SESSION_TTL_HOURS = 24
+# انظر الترويسة: مربوطة بـleads_store.SILENCE_WINDOW_HOURS، والربط
+# مفروض في settings.py. لا تُستورَد من leads_store: طبقة التخزين لا
+# تعرف طبقة الـLeads.
+SESSION_TTL_HOURS = settings.SESSION_TTL_HOURS
 
 STATE_IDLE = "idle"
 STATE_AWAITING_BOOKING_REPLY = "awaiting_booking_reply"
