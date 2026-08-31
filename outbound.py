@@ -40,6 +40,7 @@
 import sys
 
 import events
+import privacy
 import variants
 from channel_interface import MessagingChannel, OutgoingMessage
 
@@ -70,14 +71,19 @@ def send(
     try:
         success = channel.send_message(message)
     except Exception as e:
-        print(f"[OUT-FAIL] -> {message.user_id}: فشل الإرسال: {e}")
+        # لم يعبر نص العميلة هذه الطبقة، فالرسالة تُطبع - انقطاع الشبكة
+        # لا يُشخَّص باسم النوع وحده. لكن استثناء `requests` يحمل الـURL
+        # كاملاً، وURL تلغرام يحمل التوكن: `scrub_secrets` تنقّيه دائماً.
+        print(f"[OUT-FAIL] -> {message.user_id}: فشل الإرسال: {privacy.describe_error(e)}")
         return False
 
+    # [S12] النص الصادر محجوب في الفرعين. `variant_id` بجواره يقود إلى
+    # النص الكامل في variants.py، فلا شيء تشخيصي يُفقَد بحجبه.
     if not success:
-        print(f"[OUT-FAIL] -> {message.user_id}: {message.text}")
+        print(f"[OUT-FAIL] -> {message.user_id}: {privacy.redact(message.text)}")
         return False
 
-    print(f"[OUT] -> {message.user_id}: {message.text} ({message.variant_id})")
+    print(f"[OUT] -> {message.user_id}: {privacy.redact(message.text)} ({message.variant_id})")
 
     if event_type is not None:
         events.emit(

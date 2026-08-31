@@ -28,6 +28,7 @@ ai_understand (اختياري) يُستدعى بعد حساب الرد وقبل 
 from typing import Callable, Optional
 
 import outbound
+import privacy
 import variants
 from channel_interface import (
     MessagingChannel,
@@ -63,13 +64,20 @@ class MessageRouter:
                 return
             self._processed_message_ids.add(dedup_key)
 
-        print(f"[IN]  ({message.channel}) {message.user_id}: {message.text}")
+        # [S12] نص الرسالة لا يُطبع. حين تكون الجلسة awaiting_contact_info
+        # يكون هذا النص هو الاسم والرقم - انظر ترويسة privacy.py.
+        print(f"[IN]  ({message.channel}) {message.user_id}: {privacy.redact(message.text)}")
 
         # 1) القواعد الثابتة تحدد الرد الفعلي أولاً وحصرياً
         try:
             decision = self.handler(message)
         except Exception as e:
-            print(f"[ERROR] فشل معالجة الرسالة من {message.user_id}: {e}")
+            # `handler` يمرّ بمنطق العمل كله وقد يستدعي طبقة الفهم، ونص
+            # العميلة يعبره - فرسالة استثنائه تُعامَل كأنها قد تحمله.
+            print(
+                f"[ERROR] فشل معالجة الرسالة من {message.user_id}: "
+                f"{privacy.describe_error(e, may_carry_text=True)}"
+            )
             # رد الخطأ صادر كأي صادر آخر: يحمل صياغته ويُسجَّل. lead_id
             # غير معروف هنا - العطل وقع قبل أن يُحدَّد أي Lead.
             decision = ReplyDecision(
@@ -84,7 +92,10 @@ class MessageRouter:
             try:
                 self.ai_understand(message)
             except Exception as e:
-                print(f"[AI Understanding] فشل غير متوقع في الطبقة الجانبية: {e}")
+                print(
+                    "[AI Understanding] فشل غير متوقع في الطبقة الجانبية: "
+                    f"{privacy.describe_error(e, may_carry_text=True)}"
+                )
 
         # 3) إرسال الرد الفعلي عبر مسار الإرسال الموحّد (outbound.send):
         # هو الذي يستدعي القناة، يعزل فشلها، يطبع سطر [OUT]، ويُصدر

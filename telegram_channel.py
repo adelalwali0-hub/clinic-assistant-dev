@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 import requests
 
+import privacy
 from channel_interface import (
     MessagingChannel,
     IncomingMessage,
@@ -49,7 +50,9 @@ class TelegramChannel(MessagingChannel):
             )
             return resp.status_code == 200
         except requests.RequestException as e:
-            print(f"[TelegramChannel] فشل الإرسال: {e}")
+            # `base_url` يحمل التوكن، و`requests` يضع الـURL كاملاً في نص
+            # الاستثناء. التنقية غير مشروطة بأي راية - انظر privacy.py.
+            print(f"[TelegramChannel] فشل الإرسال: {privacy.describe_error(e)}")
             return False
 
     def _poll_loop(self, on_message: Callable[[IncomingMessage], None]) -> None:
@@ -68,7 +71,14 @@ class TelegramChannel(MessagingChannel):
                 data = resp.json()
 
                 if not data.get("ok"):
-                    print(f"[TelegramChannel] خطأ من Telegram: {data}")
+                    # الجسم الخام لا يُطبع: `getUpdates` الفاشل يُرجع وصفاً
+                    # اليوم، لكنه مخرَج API غير محدود لا نملك شكله.
+                    # `description` وحده هو ما يُشخِّص، وهو من تلغرام لا
+                    # من العميلة.
+                    print(
+                        "[TelegramChannel] خطأ من Telegram: "
+                        f"{privacy.scrub_secrets(str(data.get('description', 'بلا وصف')))}"
+                    )
                     time.sleep(self.poll_interval)
                     continue
 
@@ -90,5 +100,5 @@ class TelegramChannel(MessagingChannel):
             except requests.exceptions.ReadTimeout:
                 continue
             except requests.RequestException as e:
-                print(f"[TelegramChannel] خطأ في الاستطلاع: {e}")
+                print(f"[TelegramChannel] خطأ في الاستطلاع: {privacy.describe_error(e)}")
                 time.sleep(self.poll_interval)

@@ -14,6 +14,8 @@ import os
 import json
 from openai import OpenAI
 
+import privacy
+
 MODEL_NAME = "gpt-4o-mini"
 
 ALLOWED_INTENTS = {
@@ -83,7 +85,11 @@ def _validate_and_normalize(parsed: dict) -> dict:
     service_mentioned = parsed.get("service_mentioned")
 
     if intent not in ALLOWED_INTENTS:
-        print(f"[AI Understanding] intent غير مسموح: {intent!r} - استخدام fallback")
+        # [S12] القيمة نفسها لا تُطبع: حين يخرج النموذج عن القائمة
+        # المغلقة، ما يخرج به نصٌّ مشتقّ من كلام العميلة. اسم النوع
+        # يكفي لتشخيص «النموذج خرج عن القائمة».
+        detail = repr(intent) if privacy.echo_enabled() else type(intent).__name__
+        print(f"[AI Understanding] intent غير مسموح ({detail}) - استخدام fallback")
         return dict(FALLBACK_RESULT)
 
     if service_mentioned is not None and not isinstance(service_mentioned, str):
@@ -117,5 +123,11 @@ def understand_message(current_text: str, recent_history: list = None, session_s
     except SystemExit:
         raise  # فشل ضبط المفتاح يجب أن يوقف البرنامج بوضوح، وليس أن يُخفى بـ fallback
     except Exception as e:
-        print(f"[AI Understanding] خطأ أثناء الفهم: {e} - استخدام fallback")
+        # [S12] الموضع الذي لا يذكره §18 وهو أخطر مما يذكره: نص العميلة
+        # ذهب في **جسم** هذا الطلب، وخطأ من مكتبة OpenAI قد يُعيد الجسم
+        # حرفياً. اسم النوع وحده افتراضياً - privacy.describe_error.
+        print(
+            f"[AI Understanding] خطأ أثناء الفهم: "
+            f"{privacy.describe_error(e, may_carry_text=True)} - استخدام fallback"
+        )
         return dict(FALLBACK_RESULT)

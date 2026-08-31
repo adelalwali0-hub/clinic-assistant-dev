@@ -15,6 +15,9 @@ Rollback فوري: إعادة USE_AI_INTENT إلى false يعيد النظام �
 """
 
 import os
+import sys
+
+import privacy
 from telegram_channel import TelegramChannel
 from channel_interface import ReplyDecision
 from message_router import MessageRouter
@@ -66,7 +69,34 @@ def combined_handler(message) -> ReplyDecision:
     return decision
 
 
+#: راية الصدى - راية سطر أوامر لا مفتاح إعداد ولا متغيّر بيئة، ولا
+#: تُقرأ إلا داخل `__main__` أدناه. السبب كامل في ترويسة privacy.py:
+#: ملف الإعداد ومتغيّر البيئة أثران **يبقيان** على جهاز التشغيل، وS12
+#: يطلب تشخيصاً لا يستطيع أن يبقى. كل ما يستورد النظام - الاختبارات
+#: والتقارير وسكربتات المتابعة - يجده مطفأً بلا مسار لإشعاله.
+ECHO_FLAG = "--echo-customer-text"
+
+
+def _apply_cli_flags(argv: list[str]) -> None:
+    """
+    راية معروفة واحدة، وأي شيء آخر يوقف الإقلاع.
+
+    الرفض لا التجاهل - نفس منطق `settings.py` مع المفاتيح المجهولة:
+    راية مكتوبة خطأً (`--echo-customer-texts`) تُتجاهَل بصمت فيظن
+    كاتبها أنه أشعل الصدى، ويقرأ `<محجوب: …>` تعطّلاً لا حجباً.
+    """
+    unknown = [arg for arg in argv if arg != ECHO_FLAG]
+    if unknown:
+        raise SystemExit(
+            f"راية غير معروفة: {'، '.join(unknown)}\n"
+            f"المعروف: {ECHO_FLAG} (تشخيص تطويري - يطبع نصوص العميلات في الطرفية)"
+        )
+    if ECHO_FLAG in argv:
+        privacy.enable_echo()
+
+
 if __name__ == "__main__":
+    _apply_cli_flags(sys.argv[1:])
     channel = TelegramChannel(bot_token=BOT_TOKEN)
     router = MessageRouter(channel=channel, handler=combined_handler)
     router.run()
