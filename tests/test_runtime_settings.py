@@ -279,20 +279,32 @@ def test_direct_mode_boots_once_every_rail_is_built(tmp_path, monkeypatch):
     اليوم الذي تُبنى فيه الحواجز الثلاثة يمر الوضع المباشر بلا تعديل على
     الحارس - قلبُ علامة «مبني؟» وحده يكفي. يُثبَّت هنا حتى لا يكتشف من
     يبني S8 أن الحارس يرفض إلى الأبد.
+
+    `send_window` في الإعداد منذ أن بُني S8: `_check_mode_rails` يشترط
+    قيمتها صراحةً في الوضع المباشر - حاجز مبنيٌّ بلا قيمة مضبوطة لا
+    يمنع شيئاً. الاشتراط الثاني وُلد مع الحاجز، وهذا الاختبار كان يسبقه.
     """
     monkeypatch.setattr(settings, "_RAILS_REQUIRED_FOR_DIRECT", tuple(
         (code, label, True) for code, label, _ in settings._RAILS_REQUIRED_FOR_DIRECT
     ))
-    loaded = load(tmp_path, monkeypatch, {"mode": "direct"})
+    loaded = load(tmp_path, monkeypatch, {
+        "mode": "direct",
+        "channels": {"telegram": {"send_window": {"from": "09:00", "to": "21:00"}}},
+    })
     assert loaded["mode"] == settings.MODE_DIRECT
 
 
 # ------------------------------------------------- 5) المفاتيح المحجوزة (§19)
 
-def test_reserved_keys_are_validated_but_not_consumed(tmp_path, monkeypatch):
+def test_reserved_key_is_validated_but_not_consumed(tmp_path, monkeypatch):
     """
-    §19: «تُستوعب القيود في شكل المعطيات فقط». المفتاحان يمرّان بلا أثر
-    على أي قيمة يقرأها الكود - S7 وS8 غير مبنيين.
+    §19: «تُستوعب القيود في شكل المعطيات فقط». `max_messages_per_lead`
+    يمرّ بلا أثر على أي قيمة يقرأها الكود - S7 غير مبني.
+
+    و`send_window` بجواره هو الوجه الآخر: كان محجوزاً مثله حتى بُني S8،
+    فصار **يُقرأ**. المفتاحان في اختبار واحد عمداً - الفرق بينهما هو
+    كامل الفرق بين «شكل مثبَّت» و«حاجز نافذ»، بنفس المفتاح وبلا هجرة
+    إعداد. من يبني S7 ينقل سطره من النفي إلى الإثبات.
     """
     loaded = load(tmp_path, monkeypatch, {
         "channels": {"telegram": {
@@ -303,7 +315,7 @@ def test_reserved_keys_are_validated_but_not_consumed(tmp_path, monkeypatch):
     })
     assert loaded["silence_window_hours"] == 24
     assert "max_messages_per_lead" not in loaded
-    assert "send_window" not in loaded
+    assert loaded["send_window"] == (9 * 60, 21 * 60)
 
 
 @pytest.mark.parametrize("window", [
