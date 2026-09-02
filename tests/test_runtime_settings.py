@@ -260,11 +260,18 @@ def test_direct_mode_refuses_to_boot_while_rails_unbuilt(tmp_path, monkeypatch):
     """
     §18 مُنفَّذاً لا موصوفاً: «التأجيل مشروط بشكل الـPilot لا بالوقت».
     كان هذا الشرط جملة في وثيقة لا يعرفها الكود؛ صار رفض إقلاع.
+
+    الحاجز الباقي اليوم S7 وحده - S8 بُني وS6 بُني بعده. قائمة المانعين
+    تُفحَص مباشرةً لا عبر نص الرسالة: الرسالة تذكر S8 كذلك لكن بمعنى
+    معاكس («S8 مبني، لكن غياب النافذة…»)، فالبحث عن الرمز في النص يخلط
+    حاجزاً يمنع الإقلاع بحاجز يشترط قيمة.
     """
+    blocking = settings._rails_blocking_direct()
+    assert [code for code in ("S6", "S7", "S8") if any(code in item for item in blocking)] == ["S7"]
+
     message = load_expecting_error(tmp_path, monkeypatch, {"mode": "direct"})
 
-    for rail in ("S6", "S7", "S8"):
-        assert rail in message
+    assert "S7" in message
     assert "Gate B" in message
 
 

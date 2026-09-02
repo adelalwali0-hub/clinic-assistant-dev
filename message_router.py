@@ -100,6 +100,9 @@ class MessageRouter:
         # 3) إرسال الرد الفعلي عبر مسار الإرسال الموحّد (outbound.send):
         # هو الذي يستدعي القناة، يعزل فشلها، يطبع سطر [OUT]، ويُصدر
         # RESPONSE_SENT عند النجاح وحده. لا استدعاء مباشر للقناة هنا.
+        # [S6] `is_reply=True`: هذا رد على رسالة وردت الآن. الإيقاف يمنع
+        # ما يبدؤه النظام، ولا يجعل عميلة تكتب إلينا فلا تتلقى جواباً -
+        # انظر ترويسة outbound.py.
         outbound.send(
             self.channel,
             OutgoingMessage(
@@ -108,6 +111,7 @@ class MessageRouter:
                 variant_id=decision.variant_id,
             ),
             lead_id=decision.lead_id,
+            is_reply=True,
         )
 
     def run(self) -> None:

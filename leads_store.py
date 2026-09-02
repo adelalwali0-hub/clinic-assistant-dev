@@ -66,6 +66,25 @@ Clinic Feedback Loop (§11).
 الجلسة من mtime = حدّ أعلى) للسبب نفسه: يُختار الاتجاه الذي لا يسمح
 خطؤه بإرسال رسالة لا نملك حق إرسالها.
 
+[إيقاف الأتمتة - PRD §18 حاجز S6]
+الإيقاف **لا يسكن هذا الملف ولا أي عمود فيه**، بل
+`storage/pause_store.py` مفتاحه `(channel, user_id)`. السبب أن الإيقاف
+يخصّ إنساناً لا نيّة تجارية: عميلة لها ثلاثة استفسارات مفتوحة قالت
+«لا تراسلوني» مرة واحدة تعني الثلاثة وأي رابع تفتحه غداً. عمودٌ في
+هذا الملف كان سيجعل ذلك قاعدةً تُطبَّق بتوزيع القيمة على كل صفوفها
+وبوراثتها في كل مسار إنشاء - أي انضباطاً بشرياً في أربعة مواضع. على
+الهوية يصير بنيةً: لا صف يحمل القيمة، فلا صف يستطيع أن يفوته.
+
+هذا الملف **يقرأ** الإيقاف ولا يكتبه إلا عبر الدالتين الوحيدتين
+(`pause_automation` / `resume_automation`)، وهما هنا لا في المتجر لأن
+حدثَي §6 معلّقان على lead_id ولا يعرفهما متجرٌ لا يقرأ leads.csv.
+
+القراءة في دوال الأهلية الثلاث: الصف الموقوف ليس مؤهلاً - لا لمتابعة
+أولى ولا ثانية ولا لانتهاء. الثالثة ليست سهواً: `mark_expired` لا
+ترسل شيئاً، لكن «منتهي» تعني في §7 أنها صمتت خلال متابعتين، وهو
+ادّعاء كاذب عن عميلة لم تصلها متابعة قط. الصف الموقوف يبقى مفتوحاً -
+وهذا أثر مقصود ومعروف على مقام القمع، مسجَّل في D-023.
+
 [الهوية والمعرّف - PRD D3/D4]
 كل صف يحمل `lead_id` مستقراً يُولَّد مرة واحدة فقط ولا يتغير أبداً
 بعدها. كل دوال التعديل (mark_followup_sent, mark_expired) تُخاطب
@@ -122,6 +141,7 @@ from datetime import datetime
 import events
 import settings
 import variants  # لبصمة القالب في حدث المتابعة - وحدة أوراق بلا اعتماديات
+from storage import pause_store
 
 LEADS_FILE = "leads.csv"
 LOCK_FILE = LEADS_FILE + ".lock"
@@ -863,6 +883,100 @@ def record_hesitation(lead_id: str) -> bool:
     })
 
 
+# ------------------------------------------------- إيقاف الأتمتة (S6)
+
+def _is_paused_row(row: dict, paused: set) -> bool:
+    """
+    هل ينتمي هذا الصف إلى هوية موقوفة؟ `paused` مجموعة تُقرأ مرة واحدة
+    قبل المرور على الصفوف - انظر `pause_store.paused_identity_set`.
+    """
+    return (row.get("القناة", ""), row.get("معرف العميل", "")) in paused
+
+
+def _open_leads_for_identity_unlocked(rows: list[dict], channel: str, user_id: str) -> list[dict]:
+    """صفوف هذه الهوية التي ما زالت الأتمتة قادرة على لمسها."""
+    return [
+        row for row in rows
+        if _same_identity(row, channel, user_id) and _is_open_lead(row)
+    ]
+
+
+def _emit_automation_event(event_type: str, channel: str, user_id: str,
+                           rows: list[dict], source: str | None = None) -> int:
+    """
+    حدث لكل Lead مفتوح لهذه الهوية - أو حدث واحد بـlead_id فارغ إن لم
+    يكن لها أي Lead مفتوح (سابقة AMBIGUITY_ASKED: الواقعة وقعت ولا Lead
+    تُعلَّق عليه). يُرجع عدد الـLeads المتأثرة.
+
+    `leads_affected` في كل حمولة هو **عدد الصفوف لا عدد النساء**: من
+    يعدّ النساء يعدّ `user_id` متمايزة. القاعدة مكتوبة في events.py
+    كذلك، حيث يقرؤها من يكتب تقريراً.
+    """
+    affected = _open_leads_for_identity_unlocked(rows, channel, user_id)
+    payload_base = {
+        "user_id": user_id,
+        "leads_affected": len(affected),
+    }
+    if source is not None:
+        payload_base["source"] = source
+
+    if not affected:
+        events.emit(event_type, lead_id="", channel=channel, payload=dict(payload_base))
+        return 0
+
+    for row in affected:
+        events.emit(
+            event_type,
+            lead_id=row.get(LEAD_ID_COLUMN, ""),
+            channel=channel,
+            payload={**payload_base, "service_name": row.get("الخدمة المطلوبة", "")},
+        )
+    return len(affected)
+
+
+def pause_automation(user_id: str, channel: str,
+                     source: str = pause_store.SOURCE_OPERATOR) -> bool:
+    """
+    يوقف الأتمتة لعميلة واحدة (S6). يُرجع True إن وقع الإيقاف الآن،
+    وFalse إن كانت موقوفة أصلاً أو كانت الهوية ناقصة.
+
+    الإيقاف يخصّ الهوية فيسري على كل Leadاتها المفتوحة وعلى ما تفتحه
+    لاحقاً - انظر ترويسة الملف. `AUTOMATION_PAUSED` يُصدَر على الانتقال
+    وحده: طلب ثانٍ من نفس العميلة لا يضيف إيقافاً ثانياً لم يقع.
+
+    الترتيب كترتيب بقية الملف: الحالة تُكتب أولاً، والحدث بعد نجاحها
+    وحده. حدثٌ يقول «أوقفنا» بينما لم يُكتب الإيقاف يجعل المتابعات
+    تغادر بينما السجل يشهد أنها لن تغادر - وهو أسوأ اتجاه ممكن هنا.
+    """
+    if not pause_store.pause(channel=channel, user_id=user_id, source=source):
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        _emit_automation_event(events.AUTOMATION_PAUSED, channel, user_id, rows, source)
+    return True
+
+
+def resume_automation(user_id: str, channel: str) -> bool:
+    """
+    يرفع الإيقاف عن **عميلة واحدة معيَّنة بمعرّفها** (S6). يُرجع True
+    إن كانت موقوفة فاستُؤنفت الآن، وFalse إن لم تكن موقوفة أصلاً.
+
+    لا نظير جماعي لهذه الدالة ولن يوجد - لا هنا ولا في المتجر ولا في
+    مسار اختبار. رفع الإيقاف يستأنف مراسلة إنسانة طلبت التوقف، فيُتخذ
+    لها وحدها وبمعرّفها صراحةً.
+
+    `AUTOMATION_RESUMED` اسم مضاف إلى §6 بقرار موثّق - انظر events.py.
+    """
+    if not pause_store.resume(channel=channel, user_id=user_id):
+        return False
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        _emit_automation_event(events.AUTOMATION_RESUMED, channel, user_id, rows)
+    return True
+
+
 def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDOW_HOURS) -> list[dict]:
     """
     الشروط لم تتغير بحرف واحد. الذي تغيّر هو *من* يستوفيها: منذ
@@ -876,8 +990,11 @@ def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDO
     """
     eligible = []
     now = datetime.now()
+    paused = pause_store.paused_identity_set()
     for row in _read_all_rows():
         if row.get("الحالة") not in OPEN_STATES:
+            continue
+        if _is_paused_row(row, paused):
             continue
         if row.get("مرحلة المتابعة", "0") != "0":
             continue
@@ -895,8 +1012,11 @@ def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDO
 def get_leads_eligible_for_second_followup(hours_threshold: float = 72) -> list[dict]:
     eligible = []
     now = datetime.now()
+    paused = pause_store.paused_identity_set()
     for row in _read_all_rows():
         if row.get("الحالة") not in OPEN_STATES:
+            continue
+        if _is_paused_row(row, paused):
             continue
         if row.get("مرحلة المتابعة", "0") != "1":
             continue
@@ -917,8 +1037,11 @@ def get_leads_eligible_for_second_followup(hours_threshold: float = 72) -> list[
 def get_leads_to_expire(hours_after_second_followup: float = 72) -> list[dict]:
     candidates = []
     now = datetime.now()
+    paused = pause_store.paused_identity_set()
     for row in _read_all_rows():
         if row.get("الحالة") not in OPEN_STATES:
+            continue
+        if _is_paused_row(row, paused):
             continue
         if row.get("مرحلة المتابعة", "0") != "2":
             continue
