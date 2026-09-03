@@ -45,16 +45,27 @@ JSON لا يحمل تعليقات، ومن يبحث عن `first_followup_hours` 
 نفس سابقة `services.py`: أي مسار يستورد الإعداد يمرّ بالفحص. يشمل هذا
 `check_followups.py` وهو تقرير للقراءة لا يرسل شيئاً - وذلك مقصود:
 تقرير عن نظام لا يجوز أن يعمل أسوأ من لا تقرير، لأنه يبدو دليلاً.
+
+[التحذير - درجة ثالثة بين الغياب والفساد]
+الغياب يأخذ الافتراضي، والفساد يوقف الإقلاع. بينهما حالة ثالثة: إعداد
+**صالح** يُنتج سلوكاً على الأرجح غير مقصود. لا يجوز رفضه - هو خيار
+مشروع للمشغّل - ولا يجوز ابتلاعه صامتاً. يُطبع على stderr ويكمل الإقلاع.
+
+اليوم له حالة واحدة: نافذة إرسال أضيق من نصف اليوم (انظر
+`_warn_if_send_window_is_narrow`).
 """
 
 import json
 import os
+import sys
 
 CONFIG_PATH = os.path.join("config", "runtime_config.json")
 
 MODE_CONCIERGE = "concierge"
 MODE_DIRECT = "direct"
 _MODES = (MODE_CONCIERGE, MODE_DIRECT)
+
+_MINUTES_PER_DAY = 24 * 60
 
 # القيم الافتراضية = ما كان مكتوباً في الكود حرفياً قبل هذا الملف.
 # تغييرها هنا يغيّر سلوك كل تركيب لا يضبط المفتاح صراحةً.
@@ -81,13 +92,16 @@ MIN_CONTACT_DIGITS_CEILING = 15
 _RAILS_REQUIRED_FOR_DIRECT = (
     ("S6", "`automation_paused` لكل Lead", False),
     ("S7", "حد أقصى صارم لعدد الرسائل لكل Lead", False),
-    ("S8", "ساعات إرسال آمنة", False),
+    ("S8", "ساعات إرسال آمنة", True),
 )
 
 # مفاتيح تُقبل وتُتحقَّق ولا تُقرأ. §19: «لا يُبنى أي كود خاص بواتساب
 # الآن. تُستوعب القيود في شكل المعطيات فقط». شكلها مثبَّت من اليوم حتى
-# لا تحتاج S7/S8 هجرة إعداد يوم تصير 🔴، بل قراءة مفتاح وحارساً.
-_RESERVED_CHANNEL_KEYS = ("send_window", "max_messages_per_lead")
+# لا تحتاج S7 هجرة إعداد يوم تصير 🔴، بل قراءة مفتاح وحارساً.
+#
+# `send_window` كان هنا حتى بُني S8. خروجه من القائمة هو كامل الفرق بين
+# «شكل مثبَّت» و«حاجز نافذ»: نفس المفتاح، نفس الشكل، بلا هجرة إعداد.
+_RESERVED_CHANNEL_KEYS = ("max_messages_per_lead",)
 
 
 def _is_doc_key(key: str) -> bool:
@@ -172,44 +186,48 @@ def _read_channel(data: dict, errors: list) -> tuple:
     """
     channels = data.get("channels")
     if channels is None:
-        return "telegram", {}
+        return "telegram", {}, None
     if not isinstance(channels, dict):
         errors.append("'channels' يجب أن يكون كائن JSON يربط اسم كل قناة بإعدادها.")
-        return "telegram", {}
+        return "telegram", {}, None
 
     names = [name for name in channels if not _is_doc_key(name)]
     if not names:
         errors.append("'channels' موجود لكنه بلا أي قناة. احذفه أو ضع قناة واحدة.")
-        return "telegram", {}
+        return "telegram", {}, None
     if len(names) > 1:
         errors.append(
             f"'channels' يحمل {len(names)} قنوات ({'، '.join(names)}) والكود اليوم لا "
             "يوجّه بين قنوات: توقيت المتابعة قيمة واحدة في leads_store. "
             "ضع قناة واحدة حتى يُبنى توجيه القنوات."
         )
-        return names[0], {}
+        return names[0], {}, None
 
     name = names[0]
     channel = channels[name]
     if not isinstance(channel, dict):
         errors.append(f"'channels.{name}' يجب أن يكون كائن JSON.")
-        return name, {}
+        return name, {}, None
 
     _check_unknown_keys(
-        channel, ("followup",) + _RESERVED_CHANNEL_KEYS, f"'channels.{name}'", errors
+        channel,
+        ("followup", "send_window") + _RESERVED_CHANNEL_KEYS,
+        f"'channels.{name}'",
+        errors,
     )
     _validate_reserved(channel, name, errors)
+    send_window = _read_send_window(channel, name, errors)
 
     followup = channel.get("followup", {})
     if not isinstance(followup, dict):
         errors.append(f"'channels.{name}.followup' يجب أن يكون كائن JSON.")
-        return name, {}
-    return name, followup
+        return name, {}, send_window
+    return name, followup, send_window
 
 
 def _validate_reserved(channel: dict, name: str, errors: list) -> None:
     """
-    المفاتيح المحجوزة: تُتحقَّق ولا تُقرأ (S7/S8 غير مبنيين).
+    المفاتيح المحجوزة: تُتحقَّق ولا تُقرأ (S7 غير مبني).
 
     التحقق رغم عدم القراءة مقصود: إعداد يمرّ اليوم صامتاً ثم ينكسر يوم
     يُقرأ هو فخ مؤجَّل. شكلها يُثبَّت وهي فارغة المفعول.
@@ -222,18 +240,55 @@ def _validate_reserved(channel: dict, name: str, errors: list) -> None:
                 "(محجوز لـS7 - يُتحقَّق ولا يُقرأ بعد)"
             )
 
-    if "send_window" in channel:
-        window = channel["send_window"]
-        where = f"'channels.{name}.send_window'"
-        if not isinstance(window, dict):
-            errors.append(f"{where} يجب أن يكون كائن JSON بمفتاحَي 'from' و'to' (محجوز لـS8)")
-            return
-        _check_unknown_keys(window, ("from", "to"), where, errors)
-        for edge in ("from", "to"):
-            if edge not in window:
-                errors.append(f"{where} يفتقد '{edge}' (محجوز لـS8 - يُتحقَّق ولا يُقرأ بعد)")
-            elif not _is_hhmm(window[edge]):
-                errors.append(f"{where}.{edge} يجب أن يكون وقتاً بصيغة HH:MM، لا {window[edge]!r}")
+
+def _read_send_window(channel: dict, name: str, errors: list):
+    """
+    نافذة الإرسال الآمنة (S8) - دقيقتان من منتصف الليل، أو None.
+
+    [الغياب ليس نافذة مفتوحة بالصدفة - إنه سلوك اليوم حرفياً]
+    غياب المفتاح يعني «لا قيد»، تماماً كما كان الحال قبل هذا الحاجز.
+    هذا هو نفس عقد بقية الملف: الغياب يأخذ قيمة اليوم. لكنه يعني أيضاً
+    أن S8 **مبني وغير نافذ** - ولهذا يشترط `_check_mode_rails` وجود
+    النافذة صراحةً في الوضع المباشر: حاجز بلا قيمة مضبوطة لا يمنع شيئاً.
+
+    [الحدّان المتساويان يوقفان الإقلاع]
+    `from == to` تُكتب بها النافذة الصفرية (لا إرسال أبداً) والنافذة
+    الممتدة على اليوم كله (إرسال دائم) بنفس الشكل تماماً، ولا يملك
+    الكود ما يميّز بينهما. أي تفسير نختاره يكون تخميناً لنيّة كاتبها،
+    وأحد التفسيرين يُسكت النظام إلى الأبد بصمت.
+    """
+    if "send_window" not in channel:
+        return None
+
+    window = channel["send_window"]
+    where = f"'channels.{name}.send_window'"
+    if not isinstance(window, dict):
+        errors.append(f"{where} يجب أن يكون كائن JSON بمفتاحَي 'from' و'to'")
+        return None
+
+    _check_unknown_keys(window, ("from", "to"), where, errors)
+
+    edges = {}
+    for edge in ("from", "to"):
+        if edge not in window:
+            errors.append(f"{where} يفتقد '{edge}'")
+        elif not _is_hhmm(window[edge]):
+            errors.append(f"{where}.{edge} يجب أن يكون وقتاً بصيغة HH:MM، لا {window[edge]!r}")
+        else:
+            edges[edge] = _hhmm_to_minutes(window[edge])
+
+    if len(edges) != 2:
+        return None
+
+    if edges["from"] == edges["to"]:
+        errors.append(
+            f"{where}: 'from' و'to' متساويان ({window['from']!r}) - وبهذا الشكل نفسه "
+            "تُكتب النافذة الصفرية والنافذة الممتدة على اليوم كله، ولا يميّز الكود "
+            "بينهما. احذف 'send_window' كله ليصير الإرسال بلا قيد، أو اجعل الحدّين مختلفين."
+        )
+        return None
+
+    return (edges["from"], edges["to"])
 
 
 def _is_hhmm(value) -> bool:
@@ -243,6 +298,10 @@ def _is_hhmm(value) -> bool:
     if not (hh.isdigit() and mm.isdigit()):
         return False
     return 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
+
+
+def _hhmm_to_minutes(value: str) -> int:
+    return int(value[:2]) * 60 + int(value[3:])
 
 
 def _read_session_ttl(data: dict, silence_window, errors: list):
@@ -315,35 +374,92 @@ def _rails_blocking_direct() -> list:
     return [f"{code} ({label})" for code, label, built in _RAILS_REQUIRED_FOR_DIRECT if not built]
 
 
-def _check_mode_rails(mode: str, errors: list) -> None:
+def _check_mode_rails(mode: str, send_window, errors: list) -> None:
     """
-    §18 مُنفَّذاً: لا وضع مباشر بحواجز غير مبنية.
+    §18 مُنفَّذاً: لا وضع مباشر بحواجز غير مبنية - ولا بحاجز مبنيٍّ فارغ.
 
-    في Concierge يضغط «إرسال» إنسان، فS6 وS7 وS8 مؤجَّلة بقرار موثّق.
+    في Concierge يضغط «إرسال» إنسان، فS6 وS7 مؤجَّلان بقرار موثّق.
     التأجيل مشروط بشكل التشغيل لا بالوقت، ويسقط عند أول رسالة آلية.
+
+    الشرط الثاني وُلد مع S8: قلبُ علامة «مبني؟» وحده كان سيسمح للوضع
+    المباشر بالإقلاع بلا `send_window` في الإعداد - أي بحاجز حاضر في
+    الكود ولا يمنع شيئاً، وهو أسوأ من حاجز غائب لأنه يُقرأ في §18
+    مغلقاً. الحاجز يُبنى مرة، وتُشترط قيمته في كل تركيب يرسل بنفسه.
     """
     if mode != MODE_DIRECT:
         return
+
     missing = _rails_blocking_direct()
-    if not missing:
+    if missing:
+        errors.append(
+            f"mode = '{MODE_DIRECT}' وهذه الحواجز غير مبنية: {'، '.join(missing)}.\n"
+            "  §18: تأجيلها مشروط بوضع Concierge حيث يرسل إنسان. لحظة إرسال النظام "
+            "رسالة واحدة تلقائياً تعود إلى 🔴 فوراً،\n"
+            "  ولا يمر Gate B بأي منها مفتوحاً. ابنِ الحواجز، أو أبقِ "
+            f"mode = '{MODE_CONCIERGE}'."
+        )
+
+    if send_window is None:
+        errors.append(
+            f"mode = '{MODE_DIRECT}' بلا 'channels.<القناة>.send_window'. S8 مبني، "
+            "لكن غياب النافذة يعني «أرسل في أي ساعة» -\n"
+            "  وهو الحاجز حاضراً في الكود وفارغاً في الأثر. دليل Gate B للوضع "
+            "المباشر «لا رسالة خارج الساعات الآمنة» (§20)\n"
+            "  لا يمكن إثباته بلا ساعات مضبوطة. اضبط النافذة، أو أبقِ "
+            f"mode = '{MODE_CONCIERGE}'."
+        )
+
+
+def _warn_if_send_window_is_narrow(send_window, silence_window, warnings: list) -> None:
+    """
+    نافذة يقضي النظام خارجها من اليوم أكثر مما يقضي داخلها.
+
+    [لماذا تحذير لا خطأ]
+    نافذة ضيقة خيار مشروع للعيادة: ساعتان بعد الظهر قرار تشغيلي لا خطأ
+    مطبعي. الرفض هنا كان سيجعل الإعداد يملي على العيادة ساعات عملها.
+
+    [ولماذا لا تمرّ صامتة]
+    الضرر ليس في المنع - المؤجَّل ينتظر ولا يسقط، ولا يصير أي Lead غير
+    مؤهل: الأهلية بلا حدّ أعلى، والصف يبقى في المرحلة 0 حتى يُرسل. الضرر
+    أن **الرقم المضبوط يكفّ عن الوصف**: من يضبط متابعة عند 24 ساعة مع
+    نافذة أربع ساعات يحصل على متابعة تصل بين 24 و44 ساعة. لا شيء آخر في
+    النظام يقول له ذلك - لا التقرير ولا الاختبارات ولا الملف نفسه.
+
+    [العتبة: المغلق أكثر من المفتوح]
+    ليست «أضيق من نافذة الصمت»: نافذة الصمت 24 ساعة اليوم، فأي نافذة
+    إرسال أضيق منها - بما فيها 09:00-21:00 المرفوعة في المستودع - كانت
+    ستُطلق التحذير عند كل إقلاع. تحذير يعمل على الإعداد الافتراضي ضجيج
+    يُتجاهَل في أسبوع. «المغلق أكثر من المفتوح» بلا ثابت مُختار، ويصف
+    نفسه بجملة واحدة، ويترك 09:00-21:00 خارجه بالضبط.
+    """
+    if send_window is None:
         return
-    errors.append(
-        f"mode = '{MODE_DIRECT}' وهذه الحواجز غير مبنية: {'، '.join(missing)}.\n"
-        "  §18: تأجيلها مشروط بوضع Concierge حيث يرسل إنسان. لحظة إرسال النظام "
-        "رسالة واحدة تلقائياً تعود إلى 🔴 فوراً،\n"
-        "  ولا يمر Gate B بأي منها مفتوحاً. ابنِ الحواجز، أو أبقِ "
-        f"mode = '{MODE_CONCIERGE}'."
+
+    open_minutes = (send_window[1] - send_window[0]) % _MINUTES_PER_DAY
+    closed_minutes = _MINUTES_PER_DAY - open_minutes
+    if closed_minutes <= open_minutes:
+        return
+
+    max_hold = closed_minutes / 60
+    warnings.append(
+        f"نافذة الإرسال مفتوحة {open_minutes / 60:g} ساعة ومغلقة {max_hold:g} ساعة من اليوم.\n"
+        f"  المتابعة المستحقة عند بداية الإغلاق تنتظر حتى {max_hold:g} ساعة، فالمتابعة "
+        f"المضبوطة عند {silence_window:g} ساعة تصل فعلياً بين {silence_window:g} "
+        f"و{silence_window + max_hold:g} ساعة.\n"
+        "  لا رسالة تسقط ولا Lead يصير غير مؤهل - لكن الرقم المضبوط يكفّ عن وصف ما يحدث. "
+        "وسّع النافذة أو اخفض نافذة الصمت إن لم يكن هذا مقصوداً."
     )
 
 
 def _load() -> dict:
     errors: list = []
+    warnings: list = []
     data = _load_file(errors)
 
     _check_unknown_keys(data, ("mode", "channels", "session", "contact"), "المستوى الأعلى", errors)
 
     mode = _read_mode(data, errors)
-    channel_name, followup = _read_channel(data, errors)
+    channel_name, followup, send_window = _read_channel(data, errors)
 
     where = f"'channels.{channel_name}.followup'"
     _check_unknown_keys(
@@ -365,13 +481,19 @@ def _load() -> dict:
     session_ttl = _read_session_ttl(data, silence_window, errors)
     min_contact_digits = _read_min_contact_digits(data, errors)
 
-    _check_mode_rails(mode, errors)
+    _check_mode_rails(mode, send_window, errors)
+    _warn_if_send_window_is_narrow(send_window, silence_window, warnings)
 
     if errors:
         raise SystemExit(
             f"إعداد التشغيل {CONFIG_PATH} غير صالح ({len(errors)} خطأ):\n"
             + "\n".join(f"  - {e}" for e in errors)
         )
+
+    # بعد اجتياز الأخطاء لا قبله: تحذير يُطبع ثم يوقفه خطأ في سطر آخر
+    # ضجيجٌ في مخرجات فشل، ويُقرأ كأنه سبب الفشل.
+    for warning in warnings:
+        print(f"[CONFIG-WARN] {warning}", file=sys.stderr)
 
     return {
         "mode": mode,
@@ -381,6 +503,7 @@ def _load() -> dict:
         "expire_after_hours": expire_after,
         "session_ttl_hours": session_ttl,
         "min_contact_digits": min_contact_digits,
+        "send_window": send_window,
     }
 
 
@@ -399,3 +522,14 @@ SECOND_FOLLOWUP_HOURS = _settings["second_followup_hours"]
 EXPIRE_AFTER_HOURS = _settings["expire_after_hours"]
 SESSION_TTL_HOURS = _settings["session_ttl_hours"]
 MIN_CONTACT_DIGITS = _settings["min_contact_digits"]
+
+# نافذة الإرسال الآمنة (S8): (بداية، نهاية) بالدقائق من منتصف الليل،
+# أو None حين لا نافذة مضبوطة - أي «بلا قيد»، وهو سلوك ما قبل الحاجز.
+#
+# القيمة **دقائق لا نص**: المقارنة الزمنية تقع في كل تكرار من حلقة
+# المتابعة، وتحليل "09:00" في كل مرة عملٌ مكرَّر يمكن أن يفشل مرتين
+# بتفسيرين. التحليل مرة واحدة عند الإقلاع، والمقارنة عدد ضد عدد.
+#
+# القاعدة التي تقرأها ليست هنا بل في `outbound.is_inside_send_window`:
+# هذا الملف يقرأ الإعداد ولا يعرف الوقت. انظر ترويسة outbound.py.
+SEND_WINDOW = _settings["send_window"]
