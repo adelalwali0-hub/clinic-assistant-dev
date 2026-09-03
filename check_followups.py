@@ -11,14 +11,19 @@
 """
 
 from leads_store import (
+    SILENCE_WINDOW_HOURS,
     get_leads_eligible_for_first_followup,
     get_leads_eligible_for_second_followup,
     get_leads_to_expire,
 )
+import settings
 
-FIRST_FOLLOWUP_HOURS = 24
-SECOND_FOLLOWUP_HOURS = 72
-EXPIRE_AFTER_HOURS = 72
+# [§19] نفس سبب حذف `FIRST_FOLLOWUP_HOURS` من send_followups.py:
+# عتبة المتابعة الأولى هي نافذة الصمت نفسها. وهذا التقرير يجب أن يقرأ
+# نفس الأرقام التي يرسل بها المسار الحقيقي - كانت الثلاثة مكرّرة هنا
+# حرفياً، فتقريرٌ يقرأ نسخته الخاصة قد يطمئن إلى حالة ليست الحالة.
+SECOND_FOLLOWUP_HOURS = settings.SECOND_FOLLOWUP_HOURS
+EXPIRE_AFTER_HOURS = settings.EXPIRE_AFTER_HOURS
 
 
 def _print_group(title: str, rows: list[dict]) -> None:
@@ -38,7 +43,7 @@ def _print_group(title: str, rows: list[dict]) -> None:
 
 if __name__ == "__main__":
     stage1_candidates = get_leads_eligible_for_first_followup(
-        FIRST_FOLLOWUP_HOURS
+        SILENCE_WINDOW_HOURS
     )
     stage2_candidates = get_leads_eligible_for_second_followup(
         SECOND_FOLLOWUP_HOURS

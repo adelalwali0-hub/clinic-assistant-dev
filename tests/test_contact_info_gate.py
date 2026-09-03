@@ -94,6 +94,10 @@ def test_the_threshold_is_nine_digits_and_is_named():
     """
     الحد قيمة مسمّاة لا رقم سحري في شرط: تحته لا يوجد رقم تواصل عراقي
     صالح، وفوقه يبدأ الرفض الخاطئ.
+
+    صار الحد معطى إعداد، فهذه الدالة تحرس **الافتراضي المرفوع**. أما
+    استحالة الهبوط تحت التسعة (وهي ما يمنع عودة F9) فمفروضة في
+    settings.py ومختبَرة في tests/test_runtime_settings.py.
     """
     assert contact_info.MIN_CONTACT_DIGITS == 9
     assert contact_info.looks_like_contact_info("1" * 9) is True

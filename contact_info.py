@@ -49,9 +49,16 @@
 """
 
 import matching
+import settings
 
 # أقل عدد أرقام يجعل الرسالة بيانات تواصل محتملة - انظر الترويسة.
-MIN_CONTACT_DIGITS = 9
+#
+# صار معطى إعداد (config/runtime_config.json تحت contact.min_digits)
+# بحدّين مفروضين في الكود: [9، 15]. الحدّ الأدنى ليس تفضيلاً - الترويسة
+# أعلاه تثبت أن ما دون التسعة ليس رقم تواصل عراقي، فقيمة أقل تعيد فتح
+# F9 وتكتب صفوف حجز ملفّقة. والسقف يمنع خطأ طباعي يرفض كل عميلة صامتاً.
+# الافتراضي عند غياب المفتاح 9 نفسها.
+MIN_CONTACT_DIGITS = settings.MIN_CONTACT_DIGITS
 
 
 def count_digits(text: str) -> int:

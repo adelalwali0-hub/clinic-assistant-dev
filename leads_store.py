@@ -86,6 +86,7 @@ import uuid
 from datetime import datetime
 
 import events
+import settings
 import variants  # لبصمة القالب في حدث المتابعة - وحدة أوراق بلا اعتماديات
 
 LEADS_FILE = "leads.csv"
@@ -139,7 +140,13 @@ OUTCOME_EXPIRED = "منتهي"          # EXPIRED (§7)
 
 # نافذة الصمت (PRD §8): بعدها يصير الـLead المُسعَّر الصامت Unbooked.
 # نفس عتبة الأهلية للمتابعة الأولى - رقم واحد باسمه الصريح، لا رقمان.
-SILENCE_WINDOW_HOURS = 24
+#
+# صار معطى إعداد لا ثابتاً (§19): تُضبط في
+# config/runtime_config.json تحت channels.<القناة>.followup. القيمة
+# الافتراضية عند غياب المفتاح هي 24 نفسها، فسلوك أي تركيب لا يضبطها لم
+# يتغيّر. تُقرأ مرة عند الاستيراد، وهي القيمة التي تُثبَّت في الوسائط
+# الافتراضية لدوال الأهلية أدناه.
+SILENCE_WINDOW_HOURS = settings.SILENCE_WINDOW_HOURS
 
 # حقل تقني بقيم إنجليزية - كما lead_id تماماً. يسجّل *الإشارة الأخيرة*
 # من العميلة، وهي سؤال مختلف عن سؤال عمود "الحالة": `hesitant` إشارة
