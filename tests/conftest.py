@@ -20,7 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import events  # noqa: E402
 import leads_store  # noqa: E402
-from storage import session_store  # noqa: E402
+from storage import pause_store, session_store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +89,21 @@ def isolated_sessions_file(tmp_path, monkeypatch):
     return data_dir / "sessions.json"
 
 
+@pytest.fixture(autouse=True)
+def isolated_pauses_file(tmp_path, monkeypatch):
+    """
+    يوجّه متجر الإيقافات (S6) إلى tmp_path.
+
+    autouse بإلحاح خاص: هذا الملف يحمل قرارات عميلات بأن نتوقف عن
+    مراسلتهنّ. اختبار يكتب فيه بلا عزل يوقف الأتمتة عن هوية حقيقية -
+    أو أسوأ، يرفع إيقافاً حقيقياً فتعود المتابعات إلى من طلبت التوقف.
+    """
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(pause_store, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(pause_store, "PAUSES_FILE", str(data_dir / "pauses.json"))
+    return data_dir / "pauses.json"
+
+
 # ------------------------------------------------- حارس العزل (بعد كل اختبار)
 
 #: كل مسار بيانات تكتبه المنظومة. الفكسترات الثلاث أعلاه توجّهها كلها إلى
@@ -99,9 +114,15 @@ _ISOLATED_PATHS = (
     (leads_store, "BACKUP_FILE"),
     (leads_store, "BACKUP_FILE_PRICE_QUOTE"),
     (leads_store, "BACKUP_FILE_STATUS_VOCABULARY"),
+    # كانت الفكسترة توجّهه ولم يكن الحارس يتحقق منه - سهو من التغيير
+    # الذي أضافه. الحارس لا ينفع ناقصاً: المسار الذي لا يُفحَص هو
+    # بالضبط المسار الذي يهرب.
+    (leads_store, "BACKUP_FILE_CONSENT"),
     (session_store, "DATA_DIR"),
     (session_store, "SESSIONS_FILE"),
     (session_store, "BACKUP_FILE_STATUS_VOCABULARY"),
+    (pause_store, "DATA_DIR"),
+    (pause_store, "PAUSES_FILE"),
     (events, "EVENTS_FILE"),
 )
 
@@ -160,7 +181,8 @@ def _assert_paths_inside(tmp_root):
 # docstring عمداً - pytest يطبع جسم الفكسترة عند الفشل، فتُدفن الرسالة تحته.
 @pytest.fixture(autouse=True)
 def paths_never_escape_tmp_path(
-    tmp_path, isolated_leads_file, isolated_events_file, isolated_sessions_file
+    tmp_path, isolated_leads_file, isolated_events_file, isolated_sessions_file,
+    isolated_pauses_file,
 ):
     """بعد كل اختبار: كل مسارات البيانات ما زالت داخل tmp_path."""
     yield
