@@ -44,6 +44,9 @@ def isolated_leads_file(tmp_path, monkeypatch):
     monkeypatch.setattr(
         leads_store, "BACKUP_FILE_STATUS_VOCABULARY", str(leads_file) + ".backup-pre-status-vocabulary"
     )
+    monkeypatch.setattr(
+        leads_store, "BACKUP_FILE_CONSENT", str(leads_file) + ".backup-pre-consent"
+    )
     return leads_file
 
 
