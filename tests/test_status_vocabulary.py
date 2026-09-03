@@ -189,8 +189,9 @@ def test_migration_preserves_every_other_field(isolated_leads_file):
     """
     مواءمة المفردات تغيّر عمودي §8 وحدهما. كل حقل آخر يمرّ حرفياً.
 
-    عمودا §19 مستثنيان لأن `legacy_row` لا يكتبهما أصلاً - وهجرتهما
-    مختبَرة باسمها في test_consent_field.py.
+    عمودا §19 وعمودا §10/§11 مستثنيةٌ لأن `legacy_row` لا يكتبها
+    أصلاً - وهجرة كلٍّ منها مختبَرة باسمها في test_consent_field.py
+    وtest_holdout_and_attendance.py.
     """
     original = legacy_row("ld_g", **{
         STATUS_REASON_COLUMN: REASON_DECLINED,
@@ -203,7 +204,8 @@ def test_migration_preserves_every_other_field(isolated_leads_file):
     after = read_rows()[0]
     for field in FIELDNAMES:
         if field in ("الحالة", leads_store.CONSENT_COLUMN,
-                     leads_store.CONTACT_WINDOW_COLUMN):
+                     leads_store.CONTACT_WINDOW_COLUMN,
+                     leads_store.HOLDOUT_COLUMN, leads_store.ATTENDANCE_COLUMN):
             continue
         assert after[field] == original[field], f"الحقل '{field}' تغيّر أثناء الهجرة"
 

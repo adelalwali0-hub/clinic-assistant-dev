@@ -74,6 +74,12 @@ _DEFAULT_SECOND_FOLLOWUP_HOURS = 72     # كان send_followups.SECOND_FOLLOWUP_
 _DEFAULT_EXPIRE_AFTER_HOURS = 72        # كان send_followups.EXPIRE_AFTER_HOURS
 _DEFAULT_MIN_CONTACT_DIGITS = 9         # كان contact_info.MIN_CONTACT_DIGITS
 
+# نسبة المجموعة الضابطة (§10، D7). الافتراضي **صفر**، وهو الوحيد الذي
+# يُشغَّل به النظام اليوم: §10 يشترط أن تُحدَّد النسبة من الـBaseline
+# وحساب MDE قبل الـPilot، والاثنان غير موجودين (Gate C مفتوح). صفرٌ
+# يعني «لا تجربة تعمل» - لا صفٌّ يُسنَد ولا حدثٌ يُصدَر ولا سلوك يتغيّر.
+_DEFAULT_HOLDOUT_PERCENTAGE = 0
+
 # حدّ أدنى مفروض في الكود لا في الإعداد. تسعة ليست تفضيلاً بل ادعاء عن
 # فضاء الأرقام تثبته ترويسة contact_info: «تحت التسعة لا يوجد رقم تواصل
 # عراقي صالح». مفتاح يهبط تحت قيمة يثبت الكود استحالتها لا ينتج إلا
@@ -380,6 +386,62 @@ def _read_min_contact_digits(data: dict, errors: list) -> int:
     return value
 
 
+HOLDOUT_PERCENTAGE_FLOOR = 0
+HOLDOUT_PERCENTAGE_CEILING = 100
+
+
+def _read_holdout_percentage(data: dict, errors: list):
+    """
+    نسبة المجموعة الضابطة (§10، D7): كم من الـUnbooked لا يتلقى متابعة.
+
+    [لماذا لا يصلح `_positive_number` هنا]
+    صفرٌ هو الافتراضي **وقيمة مشروعة تماماً** - بل هي وضع التشغيل
+    الوحيد المعتمد اليوم. ودالة "العدد الموجب" ترفض الصفر بحكم اسمها.
+    الفرق ليس شكلياً: هذا هو المفتاح الوحيد في الملف الذي يعني غيابُه
+    وصفرُه الشيء نفسه بالضبط - «لا تجربة».
+
+    [المدى]
+    مئة مرفوضة صراحةً، لا لأنها خارج المدى الحسابي بل لأنها تكتب
+    «أوقِف المتابعة عن الجميع» في خانة اسمها تجربة. الحالتان تُقرآن
+    في التقرير قراءتين مختلفتين تماماً (تجربة بمجموعة معالَجة فارغة ≠
+    نظام مُطفأ)، ولا يملك الكود ما يميّز بينهما بعد كتابتها. نفس منطق
+    `send_window` حين يتساوى حدّاها: شكل واحد لنيّتين، وإحداهما تُسكِت
+    النظام إلى الأبد بصمت.
+    """
+    holdout = data.get("holdout")
+    if holdout is None:
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+    if not isinstance(holdout, dict):
+        errors.append("'holdout' يجب أن يكون كائن JSON.")
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+
+    _check_unknown_keys(holdout, ("percentage",), "'holdout'", errors)
+    if "percentage" not in holdout:
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+
+    value = holdout["percentage"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        errors.append(
+            f"'holdout.percentage' يجب أن يكون عدداً، لا {type(value).__name__}"
+        )
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+    if value >= HOLDOUT_PERCENTAGE_CEILING:
+        errors.append(
+            f"'holdout.percentage' = {value:g} يعني ألا يتلقى أي Lead متابعة إطلاقاً - "
+            "وهذا إطفاء للنظام مكتوبٌ في خانة تجربة، لا تجربة.\n"
+            "  المجموعة المعالَجة الفارغة لا تُنتج Recovery Rate تُطرح منه شيء (§9.2). "
+            f"اضبط نسبة دون {HOLDOUT_PERCENTAGE_CEILING}، أو أوقف تشغيل send_followups.py."
+        )
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+    if value < HOLDOUT_PERCENTAGE_FLOOR:
+        errors.append(
+            f"'holdout.percentage' = {value:g} أصغر من {HOLDOUT_PERCENTAGE_FLOOR}. "
+            "الصفر هو «لا تجربة»، ولا معنى لما دونه."
+        )
+        return _DEFAULT_HOLDOUT_PERCENTAGE
+    return value
+
+
 def _rails_blocking_direct() -> list:
     return [f"{code} ({label})" for code, label, built in _RAILS_REQUIRED_FOR_DIRECT if not built]
 
@@ -466,7 +528,9 @@ def _load() -> dict:
     warnings: list = []
     data = _load_file(errors)
 
-    _check_unknown_keys(data, ("mode", "channels", "session", "contact"), "المستوى الأعلى", errors)
+    _check_unknown_keys(
+        data, ("mode", "channels", "session", "contact", "holdout"), "المستوى الأعلى", errors
+    )
 
     mode = _read_mode(data, errors)
     channel_name, followup, send_window = _read_channel(data, errors)
@@ -490,6 +554,7 @@ def _load() -> dict:
 
     session_ttl = _read_session_ttl(data, silence_window, errors)
     min_contact_digits = _read_min_contact_digits(data, errors)
+    holdout_percentage = _read_holdout_percentage(data, errors)
 
     _check_mode_rails(mode, send_window, errors)
     _warn_if_send_window_is_narrow(send_window, silence_window, warnings)
@@ -514,6 +579,7 @@ def _load() -> dict:
         "session_ttl_hours": session_ttl,
         "min_contact_digits": min_contact_digits,
         "send_window": send_window,
+        "holdout_percentage": holdout_percentage,
     }
 
 
@@ -543,3 +609,12 @@ MIN_CONTACT_DIGITS = _settings["min_contact_digits"]
 # القاعدة التي تقرأها ليست هنا بل في `outbound.is_inside_send_window`:
 # هذا الملف يقرأ الإعداد ولا يعرف الوقت. انظر ترويسة outbound.py.
 SEND_WINDOW = _settings["send_window"]
+
+# نسبة المجموعة الضابطة (§10، D7). صفر = لا تجربة تعمل: لا إسناد، ولا
+# حدث، ولا صفٌّ يُستثنى من المتابعة. هذا هو وضع اليوم، ويبقى حتى
+# يُحسَب MDE من Baseline حقيقي (شرط خروج Gate C).
+#
+# القاعدة التي تقرأها ليست هنا: `leads_store.assign_holdout_groups`
+# هي وحدها التي تُسنِد، و`get_leads_eligible_for_first_followup` هي
+# وحدها التي تستثني. هذا الملف يقرأ الإعداد ولا يعرف أي Lead.
+HOLDOUT_PERCENTAGE = _settings["holdout_percentage"]

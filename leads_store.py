@@ -66,6 +66,31 @@ Clinic Feedback Loop (§11).
 الجلسة من mtime = حدّ أعلى) للسبب نفسه: يُختار الاتجاه الذي لا يسمح
 خطؤه بإرسال رسالة لا نملك حق إرسالها.
 
+[الـHoldout والحضور - PRD §10 وD7، §11]
+عمودان جديدان، ولا شيء يقرأ أحدهما في وضع اليوم:
+
+  holdout_flag      : "" | control | treatment. الإسناد حتمي من
+                      hash(lead_id)، ويقع **مرة واحدة عند UNBOOKED**
+                      ولا يتغيّر أبداً (§10). النسبة معطى إعداد
+                      (`holdout.percentage`) افتراضه صفر - أي لا تجربة
+                      تعمل، فكل صف في الملف اليوم يحمل "".
+  attendance_status : "" | attended | no_show. رصدٌ بشري من العيادة،
+                      ولا مسار إدخال له اليوم (§11 لم تُبنَ نقطتا
+                      لمسها). "" ليست "لم تحضر" أبداً.
+
+القيم الثلاث في كل عمود لا قيمتان، وهو منطق D-016 حرفياً: "لم يُسنَد"
+ليست "أُسنِد إلى المعالَجة"، و"لا رصد" ليست "لم تحضر". دمج أيّ زوج
+منها يجعل سؤال «هل رُصد أم افتُرض؟» غير قابل للإجابة يوم نقيس.
+
+الإسناد **عند UNBOOKED لا عند الإنشاء**: الإسناد عند الإنشاء يضع في
+المجموعتين نساءً حجزن فوراً أو رفضن صراحةً ولم يدخلن دورة المتابعة
+قط، فيقارن التقرير مجموعتين مختلفتي التركيب ويسمّي الفارق أثراً. انظر
+ترويسة `assign_holdout_groups`.
+
+الاستثناء من المتابعة سطر واحد في `get_leads_eligible_for_first_followup`
+بجوار حاجز الإيقاف مباشرة - وهناك مكتوبٌ بالتفصيل لماذا يبقيان اثنين
+ولا يُدمجان (قرار عميلة ≠ تصميم تجربة).
+
 [إيقاف الأتمتة - PRD §18 حاجز S6]
 الإيقاف **لا يسكن هذا الملف ولا أي عمود فيه**، بل
 `storage/pause_store.py` مفتاحه `(channel, user_id)`. السبب أن الإيقاف
@@ -112,8 +137,9 @@ Clinic Feedback Loop (§11).
 
 [النسخة الاحتياطية] قبل أول كتابة على leads.csv يُنسَخ الملف كما هو
 إلى BACKUP_FILE وBACKUP_FILE_PRICE_QUOTE وBACKUP_FILE_STATUS_VOCABULARY
-وBACKUP_FILE_CONSENT، مرة واحدة فقط لكل اسم، فيبقى لديك دائماً لقطة سليمة على القرص لكل
-تغيير يمسّ دلالة الصفوف لا شكلها فقط.
+وBACKUP_FILE_CONSENT وBACKUP_FILE_HOLDOUT_ATTENDANCE، مرة واحدة فقط لكل
+اسم، فيبقى لديك دائماً لقطة سليمة على القرص لكل تغيير يمسّ دلالة
+الصفوف لا شكلها فقط.
 
 [حماية التزامن] كل عملية تُعدِّل الملف (save_lead, mark_followup_sent,
 mark_expired, الهجرة التلقائية) تُنفَّذ بالكامل (قراءة+تعديل+كتابة)
@@ -130,6 +156,7 @@ mark_expired, الهجرة التلقائية) تُنفَّذ بالكامل (ق
 """
 
 import csv
+import hashlib
 import os
 import re
 import shutil
@@ -149,6 +176,7 @@ BACKUP_FILE = LEADS_FILE + ".backup-pre-lead-id"
 BACKUP_FILE_PRICE_QUOTE = LEADS_FILE + ".backup-pre-price-quote-lead"
 BACKUP_FILE_STATUS_VOCABULARY = LEADS_FILE + ".backup-pre-status-vocabulary"
 BACKUP_FILE_CONSENT = LEADS_FILE + ".backup-pre-consent"
+BACKUP_FILE_HOLDOUT_ATTENDANCE = LEADS_FILE + ".backup-pre-holdout-attendance"
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 LEAD_ID_COLUMN = "lead_id"
@@ -203,6 +231,12 @@ OUTCOME_EXPIRED = "منتهي"          # EXPIRED (§7)
 # الافتراضية لدوال الأهلية أدناه.
 SILENCE_WINDOW_HOURS = settings.SILENCE_WINDOW_HOURS
 
+# نسبة المجموعة الضابطة (§10، D7) - معطى إعداد، افتراضه صفر.
+# صفر = لا تجربة تعمل: `assign_holdout_groups` تخرج قبل أي قراءة، فلا
+# صفٌّ يُسنَد ولا حدث يُصدَر ولا صفٌّ يُستثنى من المتابعة. هذه قيمة
+# اليوم، وهي ما يجعل هذا التغيير بلا أثر سلوكي إطلاقاً.
+HOLDOUT_PERCENTAGE = settings.HOLDOUT_PERCENTAGE
+
 # حقل تقني بقيم إنجليزية - كما lead_id تماماً. يسجّل *الإشارة الأخيرة*
 # من العميلة، وهي سؤال مختلف عن سؤال عمود "الحالة": `hesitant` إشارة
 # لا حالة (لا مقابل لها في §7)، والصف يبقى price_quoted بعدها.
@@ -238,6 +272,50 @@ CONSENT_LEGACY_UNKNOWN = "legacy_unknown"
 # النافذة إلى الأمام - أي يزعم نافذة مفتوحة بعد إغلاقها الحقيقي.
 CONTACT_WINDOW_COLUMN = "contact_window_opened_at"
 
+# ------------------------------------------------- الـHoldout (PRD §10، D7)
+# اسم العمود من §6 حرفياً. القيم **ثلاث لا اثنتان**، وهذا تصحيح موثّق
+# على §6 بلا تعديل على PRD.md: "flag" بقيمتين لا يفرّق بين «لم يُسنَد»
+# و«أُسنِد إلى المعالَجة»، وهما واقعتان مختلفتان تماماً. الفرق هو منطق
+# D-016 حرفياً - لا تتقاسم «لم يُرصد» و«رُصد فوجدناه كذا» قيمة واحدة.
+HOLDOUT_COLUMN = "holdout_flag"
+
+# اسما المجموعتين من §9.2 نفسه (ضابطة / معالَجة).
+HOLDOUT_CONTROL = "control"        # لا تتلقى أي متابعة آلية أبداً
+HOLDOUT_TREATMENT = "treatment"    # تتلقى دورة المتابعة كاملة
+
+# "" = لم يُسنَد. ثلاثة أسباب مشروعة تماماً لها، ولا رابع:
+#   1) النسبة صفر - لا تجربة تعمل أصلاً (وضع اليوم: كل الصفوف هكذا)
+#   2) الـLead لم يبلغ UNBOOKED قط (حجزت فوراً، أو ما زالت داخل النافذة)
+#   3) هويتها موقوفة (S6) - فهي خارج التجربة بمجموعتيها، انظر أدناه
+HOLDOUT_UNASSIGNED = ""
+
+# ------------------------------------------- الحضور (PRD §11، §9.3)
+# عمود واحد بقيم إنجليزية - كما consent_status. `الحالة` **لا تتغيّر**
+# عند تسجيل الحضور: لا حالة `completed` في دورة الحياة اليوم. إضافتها
+# تحرّك OPEN_STATES وis_unbooked ومقام كل نسبة في compute_funnel_metrics،
+# وهذا التغيير لا يمسّ أي مقام (انظر ترويسة الملف).
+ATTENDANCE_COLUMN = "attendance_status"
+
+ATTENDANCE_ATTENDED = "attended"   # العيادة أكّدت الحضور -> BOOKING_COMPLETED
+ATTENDANCE_NO_SHOW = "no_show"     # العيادة قالت لم تحضر  -> NO_SHOW
+
+# "" = لا رصد. الموعد لم يقع بعد، أو لم يُسأل أحد، أو سُئل ولم يُجب.
+# **لا تُقرأ «لم تحضر» أبداً**: من لم تحضر لا تترك أثراً اليوم (§11)،
+# فالغياب في هذا العمود غياب معلومة لا معلومة غياب. `no_show` رصدٌ
+# موجب يكتبه إنسان رأى، وهو الطلب الحقيقي الوحيد في §11.
+ATTENDANCE_NONE = ""
+
+# لا `legacy_unknown` هنا - وهذا فرق مقصود عن consent_status (D-021).
+# هناك كان `none` ادّعاءً يستطيع مسار حيّ أن يقوله («مرّ هذا الصف على
+# كود لا يطلب موافقة»)، فاختلف عن الصف الذي لم يُلاحَظ أصلاً. هنا لا
+# مسار حيّ يكتب شيئاً إطلاقاً: صف اليوم وصف الأمس كلاهما غير مرصود
+# بالتساوي، ورمزان لواقعة واحدة طقسٌ لا صدق.
+#
+# `lapsed` (§11: «عدم الرد حالة صريحة: LAPSED أو غير مثبت - وليس
+# افتراض نجاح») **مقصود ولا يُعرَّف اليوم** - نفس سابقة granted/withdrawn
+# في D-021: لا شيء يكتبه. يوجد يوم توجد نقطة لمس سألت ولم تتلقَّ جواباً،
+# وعندها يكون الفرق بينه وبين "" فرقاً حقيقياً: سُئلنا فصمتنا، لا لم نسأل.
+
 FIELDNAMES = [
     LEAD_ID_COLUMN,
     "التاريخ والوقت",
@@ -253,6 +331,8 @@ FIELDNAMES = [
     "نتيجة المتابعة",
     CONSENT_COLUMN,
     CONTACT_WINDOW_COLUMN,
+    HOLDOUT_COLUMN,
+    ATTENDANCE_COLUMN,
 ]
 
 # بنية V1 القديمة (7 أعمدة). وجود عمودها المميز في ترويسة الملف هو
@@ -413,6 +493,7 @@ def _backup_once_unlocked() -> None:
         (BACKUP_FILE_PRICE_QUOTE, "إنشاء الـLead لحظة عرض السعر"),
         (BACKUP_FILE_STATUS_VOCABULARY, "مواءمة مفردات الحالة مع PRD §8"),
         (BACKUP_FILE_CONSENT, "حقل الموافقة التسويقية ونافذة التواصل (§19)"),
+        (BACKUP_FILE_HOLDOUT_ATTENDANCE, "حقلَي الـHoldout والحضور (§10، §11)"),
     ):
         if os.path.exists(backup_path):
             continue
@@ -481,6 +562,11 @@ def _needs_migration(existing_fieldnames: list[str], rows: list[dict]) -> bool:
     إطلاقاً - هي عمود موجود لم يُملأ. أما contact_window_opened_at
     الفارغ فقيمة نهائية مشروعة ("لا سجل للحظة الفتح")، فلا يُشعل شيئاً:
     لو أشعلها لأُعيدت كتابة الملف عند كل قراءة بلا نهاية.
+
+    holdout_flag وattendance_status الفارغان يتبعان النافذة لا الموافقة:
+    كلاهما قيمة نهائية مشروعة تماماً - "لم يُسنَد" و"لا رصد" - وهي قيمة
+    **كل صف في الملف اليوم** (النسبة صفر، ولا مسار حضور). إشعالهما كان
+    سيعيد كتابة الملف عند كل قراءة إلى الأبد.
     """
     if existing_fieldnames != FIELDNAMES:
         return True
@@ -500,6 +586,7 @@ def _migrate_file_if_needed_locked() -> None:
       V3 (11 عموداً، بلا status_reason) -> الحالية، بلا فقد أي حقل
       V4 (نفس الأعمدة، مفردات ما قبل §8) -> الحالية، بإعادة تسمية القيم
       V5 (بلا عمودي §19)                 -> الحالية، بلا فقد أي حقل
+      V6 (بلا عمودي §10/§11)             -> الحالية، بلا فقد أي حقل
       الحالية                            -> خروج فوري، بلا أي كتابة
 
     الأعمدة المستجدة تُملأ "" لكل صف قائم: صف كُتب قبل هذا التغيير
@@ -510,6 +597,13 @@ def _migrate_file_if_needed_locked() -> None:
     والفرق يظهر يوم نقيس. ولا يصير `none`: انظر تعليق الثابت أعلاه.
     contact_window_opened_at يبقى "" - لا سجل، ولا يُشتق من وقت
     الإنشاء لأن الاشتقاق يزعم نافذة أطول من الحقيقية.
+
+    وعمودا V6 يبقيان "" بلا استثناء ولا اشتقاق. الـholdout تحديداً
+    **لا يُحسب بأثر رجعي** لصف قديم رغم أن حسابه ممكن تماماً
+    (`_holdout_group_for` دالة نقية تعمل على أي lead_id): إسنادٌ يُكتب
+    اليوم لصفٍّ تلقّى متابعاته قبل شهر يزعم أنه كان في مجموعة، وهو
+    ادّعاء عن الماضي لا رصد له. الصف القديم لم يكن في أي تجربة، و""
+    تقول ذلك بصدق.
 
     مواءمة المفردات (V4) تغيّر *قيم* عمودين فقط - "الحالة" و"نتيجة
     المتابعة" - عبر _remap_vocabulary، وبما لا يخترع تصنيفاً لصف لا
@@ -627,6 +721,9 @@ def save_lead(user_id: str, service_name: str, channel: str, status: str, contac
             "نتيجة المتابعة": "",
             CONSENT_COLUMN: CONSENT_NONE,
             CONTACT_WINDOW_COLUMN: created_at,
+            # لا إسناد ولا رصد عند الإنشاء - انظر record_price_quote.
+            HOLDOUT_COLUMN: HOLDOUT_UNASSIGNED,
+            ATTENDANCE_COLUMN: ATTENDANCE_NONE,
         }
         rows.append(new_row)
         _write_all_rows_unlocked(rows)
@@ -735,6 +832,14 @@ def record_price_quote(user_id: str, service_name: str, channel: str) -> str:
             # التسويقية لم تُطلب هنا ولا في أي موضع (§19: لا تدفّق موافقة).
             CONSENT_COLUMN: CONSENT_NONE,
             CONTACT_WINDOW_COLUMN: created_at,
+            # الـLead يُولد **خارج** التجربة. §10: الإسناد يقع عند
+            # UNBOOKED وحده - أي بعد أن تصمت نافذة الصمت كاملةً، لا
+            # لحظة التسعير. الفرق ليس توقيتاً بل مقام التقرير كله:
+            # انظر ترويسة assign_holdout_groups.
+            #
+            # والحضور واقعة بعد موعد لم يُطلب حجزه بعد.
+            HOLDOUT_COLUMN: HOLDOUT_UNASSIGNED,
+            ATTENDANCE_COLUMN: ATTENDANCE_NONE,
         }
         rows.append(new_row)
         _write_all_rows_unlocked(rows)
@@ -977,6 +1082,150 @@ def resume_automation(user_id: str, channel: str) -> bool:
     return True
 
 
+# ------------------------------------------------- الـHoldout (PRD §10، D7)
+
+def _is_unbooked_now(row: dict, now: datetime, hours_threshold: float) -> bool:
+    """
+    شروط UNBOOKED (§8) وحدها: الحالة والمرحلة والنتيجة والزمن. **بلا
+    أي حاجز بشري** - لا إيقاف ولا holdout.
+
+    استُخرجت من `get_leads_eligible_for_first_followup` حرفياً بلا
+    تغيير شرط واحد، لأن `assign_holdout_groups` تحتاج نفس التعريف
+    بالضبط: «اللحظة التي تصير فيها مؤهلة للمتابعة الأولى» هي «اللحظة
+    التي تصير فيها UNBOOKED» (رقم واحد لا رقمان - انظر SILENCE_WINDOW_HOURS)،
+    وهي لحظة الإسناد في §10. تعريفان لنفس اللحظة كانا سينفرطان،
+    فيُسنَد الـholdout إلى مجموعة ليست هي التي تُتابَع.
+    """
+    if row.get("الحالة") not in OPEN_STATES:
+        return False
+    if row.get("مرحلة المتابعة", "0") != "0":
+        return False
+    if row.get("نتيجة المتابعة", "") != "":
+        return False
+    try:
+        created = datetime.strptime(row["التاريخ والوقت"], TIMESTAMP_FORMAT)
+    except (ValueError, KeyError):
+        return False
+    return (now - created).total_seconds() / 3600 >= hours_threshold
+
+
+def _holdout_group_for(lead_id: str, percentage: float) -> str:
+    """
+    المجموعة من `hash(lead_id)` - دالة نقية، بلا حالة، بلا قرص، بلا وقت.
+
+    [لماذا sha256 لا `hash()` المدمجة]
+    بايثون يعشوِش تجزئة النصوص لكل عملية (PYTHONHASHSEED). أي أن
+    `hash(lead_id)` يعطي رقماً مختلفاً في كل تشغيل لـsend_followups.py،
+    فتنتقل نفس العميلة بين المجموعتين بين ليلة وأخرى. هذا بالضبط ما
+    يمنعه §10 («لا عشوائية زمنية، قابل لإعادة الحساب والتدقيق»)،
+    وكان سيمرّ من كل اختبار داخل عملية واحدة بلا أن يُكشف.
+
+    [لماذا عتبة لا باقي قسمة على فئات]
+    `bucket < النسبة` تجعل رفع النسبة لاحقاً **يضيف** إلى الضابطة ولا
+    يقلب أحداً من الضابطة إلى المعالَجة. لو كانت القسمة إلى فئات
+    لأعادت كل زيادة توزيع الجميع، فيصير الصف المكتوب أمس مخالفاً
+    لإعادة حسابه اليوم بلا أن يتغيّر شيء في الـLead.
+
+    [الدقة]
+    عشرة آلاف سلّة تكفي لنسبة بخانة عشرية واحدة (12.5% = 1250)، وهي
+    أدقّ مما يستطيع حجم عيادة واحدة أن يميّزه إحصائياً أصلاً.
+    """
+    digest = hashlib.sha256(lead_id.encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) % 10000
+    return HOLDOUT_CONTROL if bucket < percentage * 100 else HOLDOUT_TREATMENT
+
+
+def _holdout_bucket_for(lead_id: str) -> int:
+    """السلّة وحدها - تدخل حمولة الحدث ليُعاد حساب القرار من السجل."""
+    return int(hashlib.sha256(lead_id.encode("utf-8")).hexdigest()[:8], 16) % 10000
+
+
+def assign_holdout_groups(percentage: float = HOLDOUT_PERCENTAGE,
+                          hours_threshold: float = SILENCE_WINDOW_HOURS) -> int:
+    """
+    يُسنِد المجموعة لكل Lead بلغ UNBOOKED ولم يُسنَد بعد. يُرجع عدد
+    المُسنَدين الآن.
+
+    [متى: عند UNBOOKED، لا عند إنشاء الـLead]
+    §10 حرفياً: «يُسنَد مرة واحدة عند `UNBOOKED` ولا يتغير أبداً».
+    والفرق ليس توقيتاً - هو **مقام التقرير**. الإسناد عند الإنشاء يضع
+    في المجموعتين نساءً حجزن فوراً أو رفضن صراحةً، ولم يدخلن دورة
+    المتابعة قط. عندها يقارن التقرير مجموعتين مختلفتي التركيب ويسمّي
+    الفارق أثراً - وهو عطب F3 نفسه في موضع جديد: رقمٌ يقيس شيئاً غير
+    الذي يسمّيه.
+
+    وبالإسناد هنا يصير المقام هو مقام §9.2 بعينه: الـUnbooked وحدهم،
+    في الطرفين، بنفس التعريف الزمني.
+
+    [لماذا تُكتب المعالَجة صراحةً ولا تُستنتج بالطرح]
+    الصف يحمل `treatment` مكتوبةً لا مستنتجة من «ليس control». لو
+    اكتُفي بوسم الضابطة، لكانت المعالَجة في أي تقرير = كل ما عداها -
+    فتمتلئ بمن حجزن فوراً وبمن هويتها موقوفة وبصفوف ما قبل التغيير،
+    ويصير مقاما الطرفين مختلفَي التركيب مرة أخرى. القيمة المكتوبة هي
+    الفرق بين «أُسنِدت إلى المعالَجة» و«لم نجد لها وسماً».
+
+    [الموقوفة خارج التجربة بمجموعتيها]
+    الشرط يمرّ عبر `_is_paused_row` كما تفعل دالة الأهلية بالضبط، فمن
+    طلبت التوقف لا تُسنَد إلى شيء وتبقى "". وضعها في المعالَجة كان
+    سيلوّثها بمن لن تصلها متابعة أبداً؛ ووضعها في الضابطة كان سيحسب
+    قرارها الشخصي تصميماً تجريبياً. الإيقاف قرار عميلة، والـholdout
+    تصميم قياس - ولا يُجمعان في مقام واحد.
+
+    [الصفر: لا شيء يقع]
+    نسبة صفر تخرج قبل أي قراءة أو كتابة أو حدث. هذا وضع اليوم المعتمد
+    (Gate C لم يُحسب بعد)، وهو ما يجعل هذا التغيير بلا أثر سلوكي.
+
+    idempotent: صفٌّ يحمل وسماً لا يُعاد إسناده أبداً - §10: «ولا
+    يتغير أبداً». تشغيل الدالة عشر مرات يُنتج نفس الملف ونفس الأحداث.
+    """
+    if percentage <= 0:
+        return 0
+
+    now = datetime.now()
+    paused = pause_store.paused_identity_set()
+    assigned = []
+
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if (row.get(HOLDOUT_COLUMN) or "") != HOLDOUT_UNASSIGNED:
+                continue
+            if not _is_unbooked_now(row, now, hours_threshold):
+                continue
+            if _is_paused_row(row, paused):
+                continue
+            lead_id = (row.get(LEAD_ID_COLUMN) or "").strip()
+            if not lead_id:
+                continue
+            row[HOLDOUT_COLUMN] = _holdout_group_for(lead_id, percentage)
+            assigned.append(row)
+
+        if not assigned:
+            return 0
+        _write_all_rows_unlocked(rows)
+
+        # الأحداث بعد نجاح الكتابة وحدها - ترتيب هذا الملف كله.
+        for row in assigned:
+            events.emit(
+                events.HOLDOUT_ASSIGNED,
+                lead_id=row[LEAD_ID_COLUMN],
+                channel=row.get("القناة", ""),
+                payload={
+                    "user_id": row.get("معرف العميل", ""),
+                    "service_name": row.get("الخدمة المطلوبة", ""),
+                    "group": row[HOLDOUT_COLUMN],
+                    # القرار قابل لإعادة الحساب من السجل وحده: السلّة
+                    # والنسبة **التي كانت نافذة لحظة وقوعه** لا نسبة
+                    # اليوم. بدونهما يصير التدقيق مشروطاً بألا يتغيّر
+                    # الإعداد أبداً.
+                    "bucket": _holdout_bucket_for(row[LEAD_ID_COLUMN]),
+                    "holdout_percentage": percentage,
+                },
+            )
+    return len(assigned)
+
+
 def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDOW_HOURS) -> list[dict]:
     """
     الشروط لم تتغير بحرف واحد. الذي تغيّر هو *من* يستوفيها: منذ
@@ -987,29 +1236,63 @@ def get_leads_eligible_for_first_followup(hours_threshold: float = SILENCE_WINDO
     الفلتر صار `in OPEN_STATES` بدل `== "not_ready"`: القيمة الواحدة
     القديمة انقسمت إلى ثلاث (price_quoted / declined / legacy_unknown)،
     وكلها كانت not_ready وكلها تبقى مؤهلة - نفس المجموعة بالضبط.
+
+    شروط UNBOOKED نفسها انتقلت إلى `_is_unbooked_now` بلا تغيير حرف،
+    ليقرأها هذا المسار و`assign_holdout_groups` من نسخة واحدة.
     """
     eligible = []
     now = datetime.now()
     paused = pause_store.paused_identity_set()
     for row in _read_all_rows():
-        if row.get("الحالة") not in OPEN_STATES:
+        if not _is_unbooked_now(row, now, hours_threshold):
             continue
+
+        # ------------------------------------------------------------
+        # [حاجزان متجاوران - ولا يُدمجان أبداً]
+        #
+        # يتشابهان في الشكل تماماً: سطرٌ يمنع متابعة. ومن يمرّ هنا غداً
+        # ليرتّب الكود سيُغريه توحيدهما في «هل هذا الصف مستثنى؟» واحدة،
+        # أو نقل الـholdout إلى `pause_store` ليصيرا متجراً واحداً.
+        # **لا تفعل.** الأول قرار عميلة على نفسها، والثاني تصميم تجربة
+        # على القياس، ولا يجوز أن يُعدّا معاً في أي مقام:
+        #
+        #   - الموقوفة استعملت حقها في ألا نراسلها (S6/D-023). عدّها في
+        #     الضابطة يحسب قرارها الشخصي تصميماً منّا، فيلوّث أثراً
+        #     نزعم أننا سبّبناه. وهي تُوقَف بمفتاح الهوية فتشمل كل
+        #     Leadاتها الحالية والقادمة.
+        #   - الضابطة اختارها `hash(lead_id)` لنقيس ما كان سيحدث بلا
+        #     تدخلنا (§10). وهي **لكل Lead** لا لكل هوية: عميلة لها
+        #     استفساران قد يقع أحدهما في كل مجموعة، وهذا سليم - رفعُه
+        #     إلى الهوية يكسر التوزيع الحتمي ويُدخل حالةً على مستوى
+        #     الهوية يمنعها §21.
+        #
+        # ولذلك أيضاً لا حارس holdout في `outbound.send` بإزاء حارس
+        # الإيقاف هناك: `send` لا يميّز متابعةً من رداً حياً، و§10 صريح
+        # أن الضابطة تتلقى رداً كاملاً فورياً على كل ما تطلبه - الحجب
+        # يقتصر على المتابعة التسويقية غير المطلوبة.
+        # ------------------------------------------------------------
         if _is_paused_row(row, paused):
             continue
-        if row.get("مرحلة المتابعة", "0") != "0":
+        if row.get(HOLDOUT_COLUMN) == HOLDOUT_CONTROL:
             continue
-        if row.get("نتيجة المتابعة", "") != "":
-            continue
-        try:
-            created = datetime.strptime(row["التاريخ والوقت"], TIMESTAMP_FORMAT)
-        except (ValueError, KeyError):
-            continue
-        if (now - created).total_seconds() / 3600 >= hours_threshold:
-            eligible.append(row)
+
+        eligible.append(row)
     return eligible
 
 
 def get_leads_eligible_for_second_followup(hours_threshold: float = 72) -> list[dict]:
+    """
+    [لا فلتر holdout هنا ولا في `get_leads_to_expire` - وليس سهواً]
+    الفلتر هناك سيكون كوداً ميتاً يدّعي حراسة. الصف الضابط لا يتلقى
+    متابعة أولى أبداً، فمرحلته تبقى "0" ولا يستوفي شرط `!= "1"` هنا
+    ولا `!= "2"` في الإنهاء. حاجزٌ لا يمكن أن يُطلَق يُقرأ في المراجعة
+    حمايةً قائمة، ويخفي أن الحماية الحقيقية هي آلة الحالات.
+
+    والفرق عن الإيقاف حقيقي: الموقوفة **تُفلتَر في الثلاث** لأن هويتها
+    قد تكون أُوقفت بعد متابعة أولى وقعت فعلاً، فتوجد صفوف موقوفة في
+    المرحلة "1" و"2" - ومنها ما لا يجوز أن يُسمّى "منتهي" (ترويسة
+    الملف). الضابطة لا يمكن أن توجد في تينك المرحلتين أصلاً.
+    """
     eligible = []
     now = datetime.now()
     paused = pause_store.paused_identity_set()
@@ -1142,6 +1425,84 @@ def mark_expired(lead_id: str) -> bool:
                                     "followup_stage": row.get("مرحلة المتابعة", "0"),
                                 })
                 return True
+        return False
+
+
+# ------------------------------------------- الحضور (PRD §11، §9.3)
+
+_ATTENDANCE_TO_EVENT = {
+    ATTENDANCE_ATTENDED: events.BOOKING_COMPLETED,
+    ATTENDANCE_NO_SHOW: events.NO_SHOW,
+}
+
+
+def record_attendance(lead_id: str, attendance: str) -> bool:
+    """
+    يسجّل ما قالته العيادة عن الحضور، ويُصدر حدثه. يُرجع True عند
+    التسجيل، وFalse عند رفضه.
+
+    [لا مسار إنتاجي يستدعي هذه الدالة اليوم - وهذا مقصود]
+    §11 يحدّد نقطة اللمس (زر «حضرت» / «لم تحضر» صباح اليوم التالي)،
+    ومَن تضغطها موظفة الدفع، وهو **سلوك جديد كلياً** لم يُتفق عليه بعد
+    (R3 مفتوح، §20). بناء الزر قبل الاتفاق يبني ما قد لا يُستعمل.
+    الموجود هنا هو الحقل والحدث والمَعبر بينهما - وهي وحدها ما يستحيل
+    استرجاعه بأثر رجعي. من يبني نقطة اللمس يجدها جاهزة ولا يخترع
+    مفرداتها تحت ضغط.
+
+    [الحضور واقعة، لا نتيجة تُشتق]
+    القيمتان الوحيدتان المقبولتان رصدٌ بشري: `attended` قالتها العيادة،
+    و`no_show` قالتها العيادة. الصمت لا يُنتج أياً منهما، ولا يوجد
+    مسار يستنتج غياباً من عدم ورود تأكيد - §11: «عدم الرد حالة صريحة
+    وليس افتراض نجاح»، وعكسه صحيح كذلك: ليس افتراض فشل.
+
+    [حارس الحالة]
+    الـLead الذي لم يبلغ `booking_requested` لا يملك موعداً أصلاً،
+    فتسجيل حضوره ادّعاء عن لقاء لم يُطلب قط. §7 يجعل كل انتقال بعد
+    REQUESTED فرعاً منه لا مساراً موازياً له.
+
+    [ما لا يتغيّر]
+    `الحالة` تبقى `booking_requested`. لا حالة `completed` في دورة
+    الحياة اليوم، وإضافتها تحرّك OPEN_STATES وis_unbooked ومقام كل
+    نسبة في compute_funnel_metrics - و§9.3 لا يحتاجها: وحدة الفوترة
+    تُشتق من `events.jsonl` (BOOKING_COMPLETED بعد FOLLOWUP_SENT بعد
+    BOOKING_REQUESTED)، لا من عمود حالة.
+
+    الحدث على الانتقال وحده: إعادة تسجيل نفس القيمة لا تُصدر حدثاً
+    ثانياً - نفس تحفّظ `mark_expired` و`pause_automation`.
+    """
+    if not lead_id:
+        return False
+    if attendance not in _ATTENDANCE_TO_EVENT:
+        return False
+
+    with _locked():
+        _migrate_file_if_needed_locked()
+        rows = _read_all_rows_unlocked()
+        for row in rows:
+            if row.get(LEAD_ID_COLUMN) != lead_id:
+                continue
+            if row.get("الحالة") != STATE_BOOKING_REQUESTED:
+                return False
+
+            already = (row.get(ATTENDANCE_COLUMN) or "") == attendance
+            row[ATTENDANCE_COLUMN] = attendance
+            _write_all_rows_unlocked(rows)
+
+            if not already:
+                events.emit(
+                    _ATTENDANCE_TO_EVENT[attendance],
+                    lead_id=lead_id,
+                    channel=row.get("القناة", ""),
+                    payload={
+                        "user_id": row.get("معرف العميل", ""),
+                        "service_name": row.get("الخدمة المطلوبة", ""),
+                        "price": row.get("سعر الخدمة وقت الإنشاء", ""),
+                        "followup_stage": row.get("مرحلة المتابعة", "0"),
+                        "outcome": row.get("نتيجة المتابعة", ""),
+                        "holdout_group": row.get(HOLDOUT_COLUMN, ""),
+                    },
+                )
+            return True
         return False
 
 

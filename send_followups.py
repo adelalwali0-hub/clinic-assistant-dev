@@ -24,6 +24,7 @@ FOLLOWUP_SENT، وتصير كل متابعة صادرة منسوبة إلى صي
 import os
 from leads_store import (
     SILENCE_WINDOW_HOURS,
+    assign_holdout_groups,
     get_leads_eligible_for_first_followup,
     get_leads_eligible_for_second_followup,
     get_leads_to_expire,
@@ -69,6 +70,14 @@ def build_followup_2_message(service_name: str) -> str:
 
 
 def run_first_followups(channel: TelegramChannel) -> None:
+    # الإسناد **قبل** طلب قائمة المؤهلين، لا بعده: هذه هي لحظة UNBOOKED
+    # (§10)، والقائمة أدناه تستثني الضابطة. عكس الترتيب كان سيرسل
+    # المتابعة الأولى إلى صف ثم يسنده إلى الضابطة في الدورة التالية.
+    #
+    # بنسبة صفر - وهي قيمة اليوم - تخرج الدالة فوراً بلا قراءة ولا
+    # كتابة ولا حدث، فهذا السطر بلا أثر حتى يُحسب MDE عند Gate C.
+    assign_holdout_groups()
+
     eligible = get_leads_eligible_for_first_followup(SILENCE_WINDOW_HOURS)
     if not eligible:
         print("Follow-up 1: لا توجد استفسارات مؤهلة حالياً.")

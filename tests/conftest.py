@@ -47,6 +47,10 @@ def isolated_leads_file(tmp_path, monkeypatch):
     monkeypatch.setattr(
         leads_store, "BACKUP_FILE_CONSENT", str(leads_file) + ".backup-pre-consent"
     )
+    monkeypatch.setattr(
+        leads_store, "BACKUP_FILE_HOLDOUT_ATTENDANCE",
+        str(leads_file) + ".backup-pre-holdout-attendance",
+    )
     return leads_file
 
 
@@ -118,6 +122,7 @@ _ISOLATED_PATHS = (
     # الذي أضافه. الحارس لا ينفع ناقصاً: المسار الذي لا يُفحَص هو
     # بالضبط المسار الذي يهرب.
     (leads_store, "BACKUP_FILE_CONSENT"),
+    (leads_store, "BACKUP_FILE_HOLDOUT_ATTENDANCE"),
     (session_store, "DATA_DIR"),
     (session_store, "SESSIONS_FILE"),
     (session_store, "BACKUP_FILE_STATUS_VOCABULARY"),

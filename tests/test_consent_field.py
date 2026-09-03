@@ -41,9 +41,12 @@ from leads_store import (
 SERVICE_BOTOX = "حقن البوتوكس"
 SERVICE_BOTOX_PRICE = "120,000 دينار"
 
-# بنية ما قبل §19: الأعمدة الحالية كلها ما عدا العمودين الجديدين.
+# بنية ما قبل §19: الأعمدة الحالية كلها ما عدا عمودَي هذا التغيير -
+# وما عدا عمودَي §10/§11 كذلك، فهما أحدث منه ولم يوجدا في V5 قط.
 V5_FIELDNAMES = [f for f in FIELDNAMES
-                 if f not in (CONSENT_COLUMN, CONTACT_WINDOW_COLUMN)]
+                 if f not in (CONSENT_COLUMN, CONTACT_WINDOW_COLUMN,
+                              leads_store.HOLDOUT_COLUMN,
+                              leads_store.ATTENDANCE_COLUMN)]
 
 
 # ----------------------------------------------------------------- أدوات
